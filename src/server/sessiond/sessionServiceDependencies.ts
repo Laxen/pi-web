@@ -31,6 +31,8 @@ export interface SessionServiceDependencyInput {
   askUserEnabled: boolean;
   /** Deployment facts appended to session system prompts; empty when there are none. */
   appendSystemPromptSections: readonly string[];
+  /** Whether ordinary new sessions may request an LLM-generated title. */
+  generateSessionNames: boolean;
   /** Auto-cancel delay for extension dialogs whose extension set no timeout; `0` waits forever. */
   extensionDialogsTimeoutMs: number;
 }
@@ -58,6 +60,7 @@ export function sessionServiceDependencies(input: SessionServiceDependencyInput)
     subsessionsEnabled: input.spawnTargets !== undefined && input.subsessionsEnabled,
     askUserEnabled: input.askUserEnabled,
     appendSystemPromptSections: input.appendSystemPromptSections,
+    generateSessionNames: input.generateSessionNames,
     extensionDialogsTimeoutMs: input.extensionDialogsTimeoutMs,
     notificationStore: input.notificationStore,
     unreadStore: input.unreadStore,

@@ -272,6 +272,7 @@ async function createSessionDaemonRuntime() {
       ...(spawnTargets === undefined ? {} : { spawnTargets }),
       subsessionsEnabled: config.subsessions,
       askUserEnabled: config.askUser,
+      generateSessionNames: config.generateSessionNames,
       config: configService,
       appendSystemPromptSections: [
         // Sessions always run nested in this daemon, so they always get the

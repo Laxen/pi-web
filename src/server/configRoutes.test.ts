@@ -41,6 +41,7 @@ describe("config routes", () => {
       allowedHosts: true,
       spawnSessions: true,
       subsessions: true,
+      generateSessionNames: false,
       shortcuts: { "core:view.chat": "mod+1", "core:session.stop": null },
       plugins: { info: { enabled: false, settings: { note: "hidden" } } },
       pathAccess: { allowedPaths: ["/tmp"] },
@@ -75,6 +76,18 @@ describe("config routes", () => {
 
     expect(response.statusCode).toBe(400);
     expect(response.json()).toHaveProperty("error");
+    expect(service.write).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid session-name generation setting before writing", async () => {
+    const response = await app.inject({
+      method: "PUT",
+      url: "/api/config",
+      payload: { config: { generateSessionNames: "no" } },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json<{ error: string }>().error).toContain("generateSessionNames must be a boolean");
     expect(service.write).not.toHaveBeenCalled();
   });
 
@@ -161,6 +174,7 @@ describe("config routes", () => {
       uploads: { defaultFolder: "uploads\\manual" },
       attachments: { defaultFolder: "attachments\\saved" },
       spawnSessions: true,
+      generateSessionNames: false,
       agent: { command: "alternate-agent", dir: "/srv/alternate-agent" },
     };
 
@@ -176,6 +190,7 @@ describe("config routes", () => {
       uploads: { defaultFolder: "uploads/manual" },
       attachments: { defaultFolder: "attachments/saved" },
       spawnSessions: true,
+      generateSessionNames: false,
       agent: { command: "alternate-agent", dir: "/srv/alternate-agent" },
     };
     expect(response.statusCode).toBe(200);
@@ -189,6 +204,7 @@ describe("config routes", () => {
       maxUploadBytes: 1024,
       spawnSessions: true,
       subsessions: false,
+      generateSessionNames: false,
       agent: { command: "alternate-agent", dir: "/srv/alternate-agent" },
     });
   });
@@ -255,6 +271,7 @@ function fullConfig(): PiWebConfigValues {
     maxUploadBytes: 1024,
     spawnSessions: false,
     subsessions: false,
+    generateSessionNames: true,
     agent: { command: "agent-lab", dir: "/srv/agent-lab" },
   };
 }
@@ -268,6 +285,7 @@ function selectedMachineConfig(): PiWebConfigValues {
     maxUploadBytes: 1024,
     spawnSessions: false,
     subsessions: false,
+    generateSessionNames: true,
     agent: { command: "agent-lab", dir: "/srv/agent-lab" },
   };
 }

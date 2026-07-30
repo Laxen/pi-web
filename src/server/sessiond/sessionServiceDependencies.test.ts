@@ -29,6 +29,7 @@ function daemonCollaborators(patch: Partial<SessionServiceDependencyInput> = {})
     subsessionsEnabled: false,
     askUserEnabled: true,
     appendSystemPromptSections: [],
+    generateSessionNames: true,
     extensionDialogsTimeoutMs: 300_000,
     ...patch,
   };
@@ -102,6 +103,11 @@ describe("sessiond session service dependency assembly", () => {
     const config = { read: () => Promise.reject(new Error("not used")) };
 
     expect(sessionServiceDependencies(daemonCollaborators({ config })).config).toBe(config);
+  });
+
+  it("passes the session-name generation preference through to the session service", () => {
+    expect(sessionServiceDependencies(daemonCollaborators({ generateSessionNames: true })).generateSessionNames).toBe(true);
+    expect(sessionServiceDependencies(daemonCollaborators({ generateSessionNames: false })).generateSessionNames).toBe(false);
   });
 
   it("passes the extension-dialog timeout through to the session service", () => {

@@ -3,7 +3,7 @@ import { customElement, property } from "lit/decorators.js";
 import type { PiWebConfigResponse, PiWebConfigValues } from "../../api";
 import "./SettingsPanelFrame";
 import type { SettingsNotice } from "./SettingsPanelFrame";
-import { askUserConfigPatch, spawnSessionsConfigPatch, subsessionsConfigPatch } from "./settingsSessiondConfig";
+import { askUserConfigPatch, generateSessionNamesConfigPatch, spawnSessionsConfigPatch, subsessionsConfigPatch } from "./settingsSessiondConfig";
 
 @customElement("settings-sessiond-panel")
 export class SettingsSessiondPanel extends LitElement {
@@ -27,6 +27,10 @@ export class SettingsSessiondPanel extends LitElement {
     const effectiveSubsessions = config?.effectiveConfig.subsessions === true && effectiveSpawn;
     const askUserOverridden = config?.envOverrides.askUser === true;
     const effectiveAskUser = config?.effectiveConfig.askUser === true;
+    // Older selected machines may not expose this setting yet. Current
+    // session daemons always resolve its default-on value.
+    const sessionNameGenerationSupported = config?.effectiveConfig.generateSessionNames !== undefined;
+    const effectiveSessionNameGeneration = config?.effectiveConfig.generateSessionNames !== false;
     return html`
       <settings-panel-frame
         heading="Session daemon"
@@ -90,12 +94,31 @@ export class SettingsSessiondPanel extends LitElement {
             </label>
             <small>Agents can post a structured question form and pause until the user responds. On by default.</small>
           </div>
+          <div class="field">
+            <span class="field-heading">
+              <span>Generate session titles with AI</span>
+            </span>
+            <label class="toggle">
+              <input
+                type="checkbox"
+                aria-label="Enable AI Session Titles"
+                .checked=${effectiveSessionNameGeneration}
+                ?disabled=${this.loading || this.saving || !sessionNameGenerationSupported}
+                @change=${(event: Event) => { void this.toggleSessionNameGeneration(event); }}
+              >
+              <span>Generate concise titles for new sessions</span>
+            </label>
+            <small>${sessionNameGenerationSupported
+              ? html`When disabled, ordinary sessions use a cleaned excerpt of their first prompt instead. Relay handoff sessions retain their deterministic titles. On by default.`
+              : html`This machine does not expose the AI session-title setting. Update and restart PI WEB on that machine to configure it.`}</small>
+          </div>
           <section class="effective-card" aria-label="Desired session daemon configuration summary">
             <h3>Desired after environment overrides</h3>
             <dl>
               <div><dt>Spawn sessions</dt><dd>${effectiveSpawn ? "Enabled" : html`<span class="muted">Disabled</span>`}</dd></div>
               <div><dt>Subsessions</dt><dd>${effectiveSubsessions ? "Enabled" : html`<span class="muted">Disabled</span>`}</dd></div>
               <div><dt>Ask questions</dt><dd>${effectiveAskUser ? "Enabled" : html`<span class="muted">Disabled</span>`}</dd></div>
+              <div><dt>AI session titles</dt><dd>${!sessionNameGenerationSupported ? html`<span class="muted">Unavailable</span>` : effectiveSessionNameGeneration ? "Enabled" : html`<span class="muted">Disabled</span>`}</dd></div>
             </dl>
           </section>
         `}
@@ -127,6 +150,11 @@ export class SettingsSessiondPanel extends LitElement {
   private async toggleAskUser(event: Event): Promise<void> {
     const enabled = event.target instanceof HTMLInputElement && event.target.checked;
     await this.onSave?.(askUserConfigPatch(enabled));
+  }
+
+  private async toggleSessionNameGeneration(event: Event): Promise<void> {
+    const enabled = event.target instanceof HTMLInputElement && event.target.checked;
+    await this.onSave?.(generateSessionNamesConfigPatch(enabled));
   }
 
   static override styles = css`

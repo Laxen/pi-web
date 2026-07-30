@@ -203,7 +203,7 @@
               <ul>
                 <li><code>host</code> / <code>port</code>: restart the gateway web/API service or process.</li>
                 <li><code>maxUploadBytes</code>: restart both the web/API process and the session daemon on that machine.</li>
-                <li><code>spawnSessions</code> / <code>subsessions</code> / <code>askUser</code> / <code>extensionDialogsTimeoutMs</code> / <code>environmentFacts</code>: restart the session daemon on that machine.</li>
+                <li><code>spawnSessions</code> / <code>subsessions</code> / <code>askUser</code> / <code>generateSessionNames</code> / <code>extensionDialogsTimeoutMs</code> / <code>environmentFacts</code>: restart the session daemon on that machine.</li>
                 <li><code>pathAccess</code>: applies on the next request; existing file views may need a browser refresh.</li>
                 <li><code>uploads.defaultFolder</code>: applies to newly opened Files upload dialogs and new direct drag/drop batches after config/workspace refresh.</li>
                 <li><code>attachments.defaultFolder</code>: applies to new prompt-attachment saves after config/workspace refresh.</li>
@@ -244,6 +244,7 @@
   "spawnSessions": true,
   "subsessions": true,
   "askUser": true,
+  "generateSessionNames": true,
   "extensionDialogsTimeoutMs": 300000,
   "plugins": {
     "workspace-tasks": { "enabled": true },
@@ -368,7 +369,7 @@ worktree_path="$1"
                 it, and whether project-local config overrides or merges with global config. Rows with JSON key
                 <code>—</code> are runtime-only environment variables, not config-file keys. <code>Global</code> means
                 machine-global. In Settings, selected-machine-safe global keys (<code>pathAccess</code>, <code>uploads</code>,
-                <code>attachments</code>, <code>maxUploadBytes</code>, <code>spawnSessions</code>, <code>subsessions</code>, <code>askUser</code>, and <code>plugins</code>)
+                <code>attachments</code>, <code>maxUploadBytes</code>, <code>spawnSessions</code>, <code>subsessions</code>, <code>askUser</code>, <code>generateSessionNames</code>, and <code>plugins</code>)
                 are edited for the selected machine; gateway host/port/allowed-hosts, keyboard shortcuts, and machine
                 registry/tokens stay local.
               </p>
@@ -462,6 +463,14 @@ worktree_path="$1"
                       <td>Agent can post question forms</td>
                       <td><code>askUser</code></td>
                       <td><code>PI_WEB_ASK_USER</code></td>
+                      <td>Global/session daemon</td>
+                      <td>Not supported locally</td>
+                      <td>Restart session daemon on that machine</td>
+                    </tr>
+                    <tr>
+                      <td>Generate session titles with AI</td>
+                      <td><code>generateSessionNames</code></td>
+                      <td>—</td>
                       <td>Global/session daemon</td>
                       <td>Not supported locally</td>
                       <td>Restart session daemon on that machine</td>
@@ -994,6 +1003,23 @@ PI_CODING_AGENT_SESSION_DIR=/opt/pi-profiles/lab-sessions</code></pre>
               <div class="callout warning">
                 <strong>Restart required:</strong> restart the session daemon after changing <code>askUser</code> or after
                 upgrading PI WEB to a version that introduces this tool. For the systemd user service, run
+                <code>systemctl --user restart pi-web-sessiond</code>.
+              </div>
+
+              <h3><code>generateSessionNames</code></h3>
+              <p>
+                <code>generateSessionNames</code> controls whether PI WEB asks the selected model to generate a concise
+                title for each ordinary new session. It defaults to <code>true</code>. Set it to <code>false</code> to
+                immediately use a cleaned, six-word excerpt of the first prompt instead, avoiding the extra
+                title-generation request. Relay handoff sessions retain their deterministic titles.
+              </p>
+              <p>
+                Use <strong>Settings → Session daemon → Generate session titles with AI</strong> to change
+                <code>generateSessionNames</code> on the selected machine.
+              </p>
+              <div class="callout warning">
+                <strong>Restart required:</strong> restart the session daemon after changing
+                <code>generateSessionNames</code>. For the systemd user service, run
                 <code>systemctl --user restart pi-web-sessiond</code>.
               </div>
             </section>

@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { DEFAULT_ATTACHMENT_FOLDER, DEFAULT_EXTENSION_DIALOGS_TIMEOUT_MS, DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_UPLOADS_FOLDER, AGENT_SESSION_DIR_ENV_KEYS, agentSessionDirEnvOverride, askUserEnabled, detectDeprecatedAgentInputs, effectiveAgentConfig, environmentFactsEnabled, effectivePiWebConfig, loadPiWebConfig, maxUploadBytes, offlineModeEnabled, savePiWebConfig, spawnSessionsEnabled, subsessionsEnabled } from "./config.js";
+import { DEFAULT_ATTACHMENT_FOLDER, DEFAULT_EXTENSION_DIALOGS_TIMEOUT_MS, DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_UPLOADS_FOLDER, AGENT_SESSION_DIR_ENV_KEYS, agentSessionDirEnvOverride, askUserEnabled, detectDeprecatedAgentInputs, effectiveAgentConfig, environmentFactsEnabled, effectivePiWebConfig, loadPiWebConfig, maxUploadBytes, offlineModeEnabled, savePiWebConfig, sessionNameGenerationEnabled, spawnSessionsEnabled, subsessionsEnabled } from "./config.js";
 
 let tempDir: string;
 let configPath: string;
@@ -239,6 +239,17 @@ describe("PI WEB config persistence", () => {
     expect(() => loadPiWebConfig(testOptions())).toThrow("PI WEB config askUser must be a boolean");
   });
 
+  it("round-trips the session-name generation key through save and load", () => {
+    expect(savePiWebConfig({ generateSessionNames: false }, testOptions()).config).toEqual({ generateSessionNames: false });
+    expect(loadPiWebConfig(testOptions()).config).toEqual({ generateSessionNames: false });
+  });
+
+  it("rejects a non-boolean generateSessionNames key", async () => {
+    await writeFile(configPath, `${JSON.stringify({ generateSessionNames: "yes" }, null, 2)}\n`, "utf8");
+
+    expect(() => loadPiWebConfig(testOptions())).toThrow("PI WEB config generateSessionNames must be a boolean");
+  });
+
   it("round-trips and validates the environmentFacts key", async () => {
     expect(savePiWebConfig({ environmentFacts: false }, testOptions()).config).toEqual({ environmentFacts: false });
     expect(loadPiWebConfig(testOptions()).config).toEqual({ environmentFacts: false });
@@ -339,6 +350,16 @@ describe("askUserEnabled", () => {
 
   it("treats an empty env value as unset", () => {
     expect(askUserEnabled({ PI_WEB_ASK_USER: "" }, { askUser: false })).toBe(false);
+  });
+});
+
+describe("sessionNameGenerationEnabled", () => {
+  it("is on by default to preserve LLM-generated session titles", () => {
+    expect(sessionNameGenerationEnabled({})).toBe(true);
+  });
+
+  it("honors an explicit config opt-out", () => {
+    expect(sessionNameGenerationEnabled({ generateSessionNames: false })).toBe(false);
   });
 });
 
