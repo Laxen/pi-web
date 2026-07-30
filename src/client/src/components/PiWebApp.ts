@@ -2143,6 +2143,22 @@ export class PiWebApp extends LitElement {
   private panelLayoutActions(): AppAction[] {
     return [
       {
+        id: "app.layout.toggle-navigation-panel",
+        title: "Toggle Navigation Panel",
+        description: "Show or hide the navigation side panel",
+        shortcut: "mod+g n",
+        group: "View",
+        run: () => { this.panelCollapse.toggleNavigationPanel(); },
+      },
+      {
+        id: "app.layout.toggle-workspace-panel",
+        title: "Toggle Workspace Panel",
+        description: "Show or hide the workspace side panel",
+        shortcut: "mod+g e",
+        group: "View",
+        run: () => { this.panelCollapse.toggleWorkspacePanel(); },
+      },
+      {
         id: "app.layout.reset-navigation-panel-size",
         title: "Reset Navigation Panel Size",
         description: "Restore the navigation panel to its default width",
