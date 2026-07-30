@@ -15,6 +15,10 @@ export function askUserConfigPatch(enabled: boolean): PiWebConfigValues {
   return { askUser: enabled };
 }
 
+export function generateSessionNamesConfigPatch(enabled: boolean): PiWebConfigValues {
+  return { generateSessionNames: enabled };
+}
+
 export function agentProfileActivationState(
   config: PiWebConfigResponse | undefined,
   activeProfile: ActiveAgentProfileDescriptor | undefined,

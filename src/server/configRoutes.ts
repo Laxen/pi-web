@@ -16,6 +16,7 @@ export const SELECTED_MACHINE_CONFIG_KEYS = [
   "spawnSessions",
   "subsessions",
   "askUser",
+  "generateSessionNames",
   "agent",
 ] as const satisfies readonly (keyof PiWebConfigValues)[];
 
@@ -133,6 +134,7 @@ function parseConfigRequest(value: unknown, agentPathHost: AgentPathHost = "curr
   const spawnSessions = value["spawnSessions"];
   const subsessions = value["subsessions"];
   const askUser = value["askUser"];
+  const generateSessionNames = value["generateSessionNames"];
   const agent = value["agent"];
   if (host !== undefined) {
     if (typeof host !== "string") throw new Error("PI WEB config host must be a string");
@@ -160,6 +162,10 @@ function parseConfigRequest(value: unknown, agentPathHost: AgentPathHost = "curr
     if (typeof askUser !== "boolean") throw new Error("PI WEB config askUser must be a boolean");
     config.askUser = askUser;
   }
+  if (generateSessionNames !== undefined) {
+    if (typeof generateSessionNames !== "boolean") throw new Error("PI WEB config generateSessionNames must be a boolean");
+    config.generateSessionNames = generateSessionNames;
+  }
   if (agent !== undefined) config.agent = parseAgentRequest(agent, agentPathHost);
   return config;
 }
@@ -173,6 +179,7 @@ function pickSelectedMachineConfig(config: PiWebConfigValues): PiWebConfig {
     ...(config.spawnSessions !== undefined ? { spawnSessions: config.spawnSessions } : {}),
     ...(config.subsessions !== undefined ? { subsessions: config.subsessions } : {}),
     ...(config.askUser !== undefined ? { askUser: config.askUser } : {}),
+    ...(config.generateSessionNames !== undefined ? { generateSessionNames: config.generateSessionNames } : {}),
     ...(config.agent !== undefined ? { agent: config.agent } : {}),
   };
 }

@@ -15,11 +15,12 @@ export interface LoadedPiWebConfig {
   config: PiWebConfig;
 }
 
-export interface EffectivePiWebConfig extends Omit<PiWebConfig, "uploads" | "spawnSessions" | "subsessions" | "askUser" | "agent" | "extensionDialogsTimeoutMs"> {
+export interface EffectivePiWebConfig extends Omit<PiWebConfig, "uploads" | "spawnSessions" | "subsessions" | "askUser" | "generateSessionNames" | "agent" | "extensionDialogsTimeoutMs"> {
   uploads: NonNullable<PiWebConfig["uploads"]>;
   spawnSessions: boolean;
   subsessions: boolean;
   askUser: boolean;
+  generateSessionNames: boolean;
   extensionDialogsTimeoutMs: number;
   agent: Required<NonNullable<PiWebConfig["agent"]>>;
 }
@@ -168,6 +169,8 @@ export function resolveEffectivePiWebConfig(loaded: LoadedPiWebConfig, options: 
       subsessions: subsessionsEnabled(env, loaded.config),
       // Always resolved (on by default); the user is present for every ask.
       askUser: askUserEnabled(env, loaded.config),
+      // Always resolved (on by default) so sessiond can skip the title request.
+      generateSessionNames: sessionNameGenerationEnabled(loaded.config),
       // Always resolved; the unattended-dialog safety valve, not a gate.
       extensionDialogsTimeoutMs: loaded.config.extensionDialogsTimeoutMs ?? DEFAULT_EXTENSION_DIALOGS_TIMEOUT_MS,
       agent: { command: agent.command, dir: agent.dir },
@@ -193,6 +196,7 @@ export function savePiWebConfig(config: PiWebConfig, options: LoadOptions = {}):
   delete existing["spawnSessions"];
   delete existing["subsessions"];
   delete existing["askUser"];
+  delete existing["generateSessionNames"];
   delete existing["agent"];
   const merged = { ...existing, ...piWebConfigRecord(normalized) };
   mkdirSync(dirname(path), { recursive: true });
@@ -220,6 +224,7 @@ function piWebConfigRecord(config: PiWebConfig): Record<string, unknown> {
     ...(config.spawnSessions !== undefined ? { spawnSessions: config.spawnSessions } : {}),
     ...(config.subsessions !== undefined ? { subsessions: config.subsessions } : {}),
     ...(config.askUser !== undefined ? { askUser: config.askUser } : {}),
+    ...(config.generateSessionNames !== undefined ? { generateSessionNames: config.generateSessionNames } : {}),
     ...(config.agent !== undefined ? { agent: config.agent } : {}),
   };
 }
@@ -237,6 +242,7 @@ function parsePiWebConfig(value: Record<string, unknown>, path: string): PiWebCo
     ...(value["spawnSessions"] !== undefined ? { spawnSessions: parseSpawnSessions(value["spawnSessions"], path) } : {}),
     ...(value["subsessions"] !== undefined ? { subsessions: parseSubsessions(value["subsessions"], path) } : {}),
     ...(value["askUser"] !== undefined ? { askUser: parseAskUser(value["askUser"], path) } : {}),
+    ...(value["generateSessionNames"] !== undefined ? { generateSessionNames: parseSessionNameGeneration(value["generateSessionNames"], path) } : {}),
     ...(value["extensionDialogsTimeoutMs"] !== undefined ? { extensionDialogsTimeoutMs: parseExtensionDialogsTimeoutMs(value["extensionDialogsTimeoutMs"], path) } : {}),
     ...(value["agent"] !== undefined ? { agent: parseAgentConfig(value["agent"], path) } : {}),
   };
@@ -289,6 +295,11 @@ function parseAskUser(value: unknown, path: string): boolean {
   return value;
 }
 
+function parseSessionNameGeneration(value: unknown, path: string): boolean {
+  if (typeof value !== "boolean") throw new Error(`PI WEB config generateSessionNames must be a boolean: ${path}`);
+  return value;
+}
+
 function parseExtensionDialogsTimeoutMs(value: unknown, path: string): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
     throw new Error(`PI WEB config extensionDialogsTimeoutMs must be a non-negative integer: ${path}`);
@@ -307,6 +318,11 @@ export function askUserEnabled(env: NodeJS.ProcessEnv = process.env, config: PiW
   const fromEnv = env["PI_WEB_ASK_USER"];
   if (fromEnv !== undefined && fromEnv !== "") return fromEnv === "1" || fromEnv.toLowerCase() === "true";
   return config.askUser ?? true;
+}
+
+/** Whether the daemon uses a model request to title ordinary new sessions. */
+export function sessionNameGenerationEnabled(config: PiWebConfig = {}): boolean {
+  return config.generateSessionNames ?? true;
 }
 
 const OFFLINE_ENV_KEYS = ["PI_WEB_OFFLINE", "PI_OFFLINE"] as const;
@@ -523,4 +539,3 @@ function isNonEmptyStringArray(value: unknown): value is string[] {
 export function examplePiWebConfig(config: PiWebConfig = {}): string {
   return `${JSON.stringify({ host: config.host ?? "127.0.0.1", port: config.port ?? 8504, allowedHosts: config.allowedHosts ?? [] }, null, 2)}\n`;
 }
-

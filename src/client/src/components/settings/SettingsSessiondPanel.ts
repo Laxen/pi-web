@@ -5,7 +5,7 @@ import "./SettingsPanelFrame";
 import type { SettingsNotice } from "./SettingsPanelFrame";
 import { agentProfileConfigPatchFromDraft, agentProfileDraftFromConfig, agentProfileDraftMatchesConfig, emptyAgentProfileConfigDraft, type AgentProfileConfigDraft } from "./settingsConfigDraft";
 import type { AgentProfileSettingsSupport } from "./settingsMachineTarget";
-import { agentDirFieldOverridden, agentProfileActivationState, askUserConfigPatch, spawnSessionsConfigPatch, subsessionsConfigPatch } from "./settingsSessiondConfig";
+import { agentDirFieldOverridden, agentProfileActivationState, askUserConfigPatch, generateSessionNamesConfigPatch, spawnSessionsConfigPatch, subsessionsConfigPatch } from "./settingsSessiondConfig";
 
 @customElement("settings-sessiond-panel")
 export class SettingsSessiondPanel extends LitElement {
@@ -52,6 +52,10 @@ export class SettingsSessiondPanel extends LitElement {
     const askUserSupported = config?.effectiveConfig.askUser !== undefined;
     const askUserOverridden = config?.envOverrides.askUser === true;
     const effectiveAskUser = config?.effectiveConfig.askUser === true;
+    // An older selected machine has no effective value and cannot persist this
+    // setting. Current servers always resolve the default-on value.
+    const sessionNameGenerationSupported = config?.effectiveConfig.generateSessionNames !== undefined;
+    const effectiveSessionNameGeneration = config?.effectiveConfig.generateSessionNames !== false;
     const agentCommandOverridden = config?.envOverrides.agentCommand === true;
     const profileEditingSupported = this.agentProfileSupport.state === "supported";
     const draftCommand = agentCommandOverridden ? (config.effectiveConfig.agent?.command ?? this.agentDraft.command) : this.agentDraft.command;
@@ -165,6 +169,24 @@ export class SettingsSessiondPanel extends LitElement {
               ? html`Agents can post a structured question form and pause until the user responds. On by default.`
               : html`This machine does not expose the Ask Questions setting. Update and restart PI WEB on that machine to configure it.`}</small>
           </div>
+          <div class="field">
+            <span class="field-heading">
+              <span>Generate session titles with AI</span>
+            </span>
+            <label class="toggle">
+              <input
+                type="checkbox"
+                aria-label="Enable AI Session Titles"
+                .checked=${effectiveSessionNameGeneration}
+                ?disabled=${this.loading || this.saving || !sessionNameGenerationSupported}
+                @change=${(event: Event) => { void this.toggleSessionNameGeneration(event); }}
+              >
+              <span>Generate concise titles for new sessions</span>
+            </label>
+            <small>${sessionNameGenerationSupported
+              ? html`When disabled, ordinary sessions use a cleaned excerpt of their first prompt instead. Relay handoff sessions retain their deterministic titles. On by default.`
+              : html`This machine does not expose the AI session-title setting. Update and restart PI WEB on that machine to configure it.`}</small>
+          </div>
           <section class="effective-card" aria-label="Desired and active session daemon configuration summary">
             <h3>Desired after environment overrides</h3>
             <dl>
@@ -176,6 +198,7 @@ export class SettingsSessiondPanel extends LitElement {
               <div><dt>Spawn sessions</dt><dd>${effectiveSpawn ? "Enabled" : html`<span class="muted">Disabled</span>`}</dd></div>
               <div><dt>Subsessions</dt><dd>${effectiveSubsessions ? "Enabled" : html`<span class="muted">Disabled</span>`}</dd></div>
               <div><dt>Ask questions</dt><dd>${!askUserSupported ? html`<span class="muted">Unavailable</span>` : effectiveAskUser ? "Enabled" : html`<span class="muted">Disabled</span>`}</dd></div>
+              <div><dt>AI session titles</dt><dd>${!sessionNameGenerationSupported ? html`<span class="muted">Unavailable</span>` : effectiveSessionNameGeneration ? "Enabled" : html`<span class="muted">Disabled</span>`}</dd></div>
             </dl>
           </section>
         `}
@@ -226,6 +249,11 @@ export class SettingsSessiondPanel extends LitElement {
   private async toggleAskUser(event: Event): Promise<void> {
     const enabled = event.target instanceof HTMLInputElement && event.target.checked;
     await this.onSave?.(askUserConfigPatch(enabled));
+  }
+
+  private async toggleSessionNameGeneration(event: Event): Promise<void> {
+    const enabled = event.target instanceof HTMLInputElement && event.target.checked;
+    await this.onSave?.(generateSessionNamesConfigPatch(enabled));
   }
 
   static override styles = css`

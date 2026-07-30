@@ -126,6 +126,46 @@ describe("PiSessionService prompt, queue, and auth warnings", () => {
     await service.dispose();
   });
 
+  it("uses the first-prompt fallback without an LLM request when session-name generation is disabled", async () => {
+    const streamFn = vi.fn<StreamFn>();
+    const hub = new CapturingSessionEventHub();
+    const fake = fakeRuntime("name-session", { model: testModel(), agent: { streamFunction: streamFn } });
+    const service = new PiSessionService(hub, {
+      agentDir: TEST_AGENT_DIR,
+      modelRuntime: testModelRuntime,
+      createAgentRuntime: runtimeCreator(fake.runtime),
+      sessionManager: sessionGateway([sessionRecord("name-session")]),
+      generateSessionNames: false,
+      heartbeatIntervalMs: 60_000,
+    });
+
+    await service.prompt(sessionRef("name-session"), "Please fix the login bug today");
+
+    expect(fake.session.sessionName).toBe("Please fix the login bug today");
+    expect(streamFn).not.toHaveBeenCalled();
+    expect(hub.sessionEvents.some(({ event }) => event.type === "session.name" && event.name === "Please fix the login bug today")).toBe(true);
+    await service.dispose();
+  });
+
+  it("keeps deterministic Relay titles when session-name generation is disabled", async () => {
+    const streamFn = vi.fn<StreamFn>();
+    const fake = fakeRuntime("relay-session", { model: testModel(), agent: { streamFunction: streamFn } });
+    const service = new PiSessionService(new CapturingSessionEventHub(), {
+      agentDir: TEST_AGENT_DIR,
+      modelRuntime: testModelRuntime,
+      createAgentRuntime: runtimeCreator(fake.runtime),
+      sessionManager: sessionGateway([sessionRecord("relay-session")]),
+      generateSessionNames: false,
+      heartbeatIntervalMs: 60_000,
+    });
+
+    await service.prompt(sessionRef("relay-session"), 'Relay "handoff-check" leg 2 begins now.\n\nContinue the work.');
+
+    expect(fake.session.sessionName).toBe("Relay handoff-check leg 2");
+    expect(streamFn).not.toHaveBeenCalled();
+    await service.dispose();
+  });
+
   it("includes queued message details in session status", async () => {
     const fake = fakeRuntime("status-session", {
       messages: [{ role: "user", content: "hello" }, { role: "assistant", content: "hi" }],

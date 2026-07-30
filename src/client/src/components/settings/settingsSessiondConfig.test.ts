@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { ActiveAgentProfileDescriptor, PiWebConfigResponse, PiWebConfigValues } from "../../api";
-import { agentDirFieldOverridden, agentProfileActivationState, askUserConfigPatch, mergeSelectedMachineSessiondConfig, spawnSessionsConfigPatch, subsessionsConfigPatch } from "./settingsSessiondConfig";
+import { agentDirFieldOverridden, agentProfileActivationState, askUserConfigPatch, generateSessionNamesConfigPatch, mergeSelectedMachineSessiondConfig, spawnSessionsConfigPatch, subsessionsConfigPatch } from "./settingsSessiondConfig";
 
 describe("session daemon settings config helpers", () => {
   it("builds daemon-only save patches for the sessiond toggles", () => {
     expect(spawnSessionsConfigPatch(false)).toEqual({ spawnSessions: false });
     expect(subsessionsConfigPatch(true)).toEqual({ subsessions: true });
     expect(askUserConfigPatch(false)).toEqual({ askUser: false });
+    expect(generateSessionNamesConfigPatch(false)).toEqual({ generateSessionNames: false });
   });
 
   it("compares the desired effective profile with the daemon-owned active profile", () => {
@@ -54,9 +55,9 @@ describe("session daemon settings config helpers", () => {
       agent: { command: "gateway-agent", dir: "/srv/gateway-agent" },
     });
     const selectedMachine = configResponse(
-      { spawnSessions: true, subsessions: true, agent: { command: "machine-agent", dir: "/srv/machine-agent" } },
+      { spawnSessions: true, subsessions: true, generateSessionNames: true, agent: { command: "machine-agent", dir: "/srv/machine-agent" } },
       { spawnSessions: true, subsessions: false, agentCommand: true, agentDir: false, agentDirSource: "pi-compatibility", agentSessionDir: true },
-      { spawnSessions: true, subsessions: true, agent: { command: "env-agent", dir: "/srv/machine-agent" } },
+      { spawnSessions: true, subsessions: true, generateSessionNames: true, agent: { command: "env-agent", dir: "/srv/machine-agent" } },
     );
 
     expect(mergeSelectedMachineSessiondConfig(gateway, selectedMachine)).toEqual({
@@ -69,6 +70,7 @@ describe("session daemon settings config helpers", () => {
         plugins: { info: { enabled: true } },
         spawnSessions: true,
         subsessions: true,
+        generateSessionNames: true,
         agent: { command: "machine-agent", dir: "/srv/machine-agent" },
       },
       effectiveConfig: {
@@ -79,6 +81,7 @@ describe("session daemon settings config helpers", () => {
         plugins: { info: { enabled: true } },
         spawnSessions: true,
         subsessions: true,
+        generateSessionNames: true,
         agent: { command: "env-agent", dir: "/srv/machine-agent" },
       },
       envOverrides: {

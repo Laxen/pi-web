@@ -767,6 +767,8 @@ export interface PiSessionServiceDependencies {
    * questions reach the user of the asking session, not another session.
    */
   askUserEnabled?: boolean;
+  /** When false, ordinary first prompts use the deterministic fallback title. */
+  generateSessionNames?: boolean;
   /** Daemon-lifetime open-ask state; defaults to an in-memory store in tests. */
   pendingAskStore?: PendingAskStore;
   /** Daemon-lifetime open-dialog state; defaults to an in-memory store in tests. */
@@ -853,6 +855,7 @@ export class PiSessionService implements SessionRouteService {
   private readonly pendingAskStore: PendingAskStore;
   private readonly pendingExtensionDialogStore: PendingExtensionDialogStore;
   private readonly extensionDialogsTimeoutMs: number;
+  private readonly generateSessionNames: boolean;
   /** The parked extension Promise resolvers behind the store's open dialogs. */
   private readonly dialogWaiters = new ExtensionDialogWaiters();
   private readonly catalogRefreshStatus: CatalogRefreshStatus | undefined;
@@ -879,6 +882,7 @@ export class PiSessionService implements SessionRouteService {
     this.pendingAskStore = deps.pendingAskStore ?? new PendingAskStore();
     this.pendingExtensionDialogStore = deps.pendingExtensionDialogStore ?? new PendingExtensionDialogStore();
     this.extensionDialogsTimeoutMs = deps.extensionDialogsTimeoutMs ?? DEFAULT_EXTENSION_DIALOGS_TIMEOUT_MS;
+    this.generateSessionNames = deps.generateSessionNames ?? true;
     this.catalogRefreshStatus = deps.catalogRefreshStatus;
     this.unreadPublicationRetryInitialMs = Math.max(
       0,
@@ -3298,6 +3302,10 @@ export class PiSessionService implements SessionRouteService {
     const deterministicName = deterministicSessionName(firstMessage);
     if (deterministicName !== undefined) {
       this.applyGeneratedSessionName(session, deterministicName);
+      return;
+    }
+    if (!this.generateSessionNames) {
+      this.applyGeneratedSessionName(session, fallbackSessionName(firstMessage));
       return;
     }
 
