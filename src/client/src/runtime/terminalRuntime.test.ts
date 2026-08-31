@@ -51,6 +51,28 @@ describe("terminal runtime", () => {
     await expect(handle.completed).resolves.toEqual(succeededRun);
   });
 
+  it("captures the navigation origin before an async terminal command opens", async () => {
+    const openTerminal = vi.fn();
+    const expected = {
+      selection: { machineId: "local", projectId: "p1", workspaceId: "w1", sessionId: undefined },
+      tool: "core:workspace.terminal",
+      view: "core:workspace.terminal",
+      url: "http://localhost/app?project=p1&workspace=w1&view=core%3Aworkspace.terminal",
+    };
+    const captureNavigation = vi.fn(() => expected);
+    const api = {
+      runTerminalCommand: vi.fn(() => Promise.resolve(succeededRun)),
+      listCommandRuns: vi.fn(),
+      getCommandRun: vi.fn(),
+    };
+    const runtime = createTerminalCommandRunsRuntime("actions", { api, captureNavigation, openTerminal });
+
+    await runtime.runCommand({ workspace, title: "Build", command: "npm run build", open: true });
+
+    expect(captureNavigation).toHaveBeenCalledOnce();
+    expect(openTerminal).toHaveBeenCalledWith(workspace, { terminalId: "t1" }, expected);
+  });
+
   it("passes through command-run lookup helpers and open requests", async () => {
     const filter: TerminalCommandRunFilter = {
       projectId: "p1",

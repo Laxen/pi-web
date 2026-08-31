@@ -113,6 +113,63 @@ describe("MachineController", () => {
     expect(state.machineStatusSnapshots).toEqual({ local: snapshot });
   });
 
+  it("publishes a newly added machine through the injected navigation boundary", async () => {
+    let state: AppState = { ...initialAppState(), machines: [localMachine], selectedMachine: localMachine };
+    const setState = (patch: Partial<AppState>) => { state = { ...state, ...patch }; };
+    const selectedAtNavigation: string[] = [];
+    const projects = { loadProjects: vi.fn() };
+    const controller = new MachineController(
+      () => state,
+      setState,
+      vi.fn(),
+      projects,
+      {
+        navigateToMachine: (machine, options) => {
+          selectedAtNavigation.push(state.selectedMachine?.id ?? "missing");
+          expect(options?.expected).toEqual({ machineId: "local", projectId: undefined, workspaceId: undefined, sessionId: undefined });
+          state = { ...state, selectedMachine: machine };
+          return Promise.resolve(true);
+        },
+      },
+    );
+    vi.spyOn(api, "addMachine").mockResolvedValue(addedMachine);
+
+    await controller.addMachine({ name: addedMachine.name, baseUrl: addedMachine.baseUrl ?? "" });
+
+    expect(selectedAtNavigation).toEqual([localMachine.id]);
+    expect(state.selectedMachine).toEqual(addedMachine);
+    expect(projects.loadProjects).not.toHaveBeenCalled();
+  });
+
+  it("publishes a fallback machine through the injected navigation boundary after removal", async () => {
+    let state: AppState = { ...initialAppState(), machines: [localMachine, remoteMachine], selectedMachine: remoteMachine };
+    const setState = (patch: Partial<AppState>) => { state = { ...state, ...patch }; };
+    const selectedAtNavigation: string[] = [];
+    const projects = { loadProjects: vi.fn() };
+    const controller = new MachineController(
+      () => state,
+      setState,
+      vi.fn(),
+      projects,
+      {
+        navigateToMachine: (machine, options) => {
+          selectedAtNavigation.push(state.selectedMachine?.id ?? "missing");
+          expect(options?.expected?.machineId).toBe(remoteMachine.id);
+          state = { ...state, selectedMachine: machine };
+          return Promise.resolve(true);
+        },
+      },
+    );
+    vi.spyOn(api, "deleteMachine").mockResolvedValue({ deleted: true });
+
+    await controller.deleteMachine(remoteMachine);
+
+    expect(selectedAtNavigation).toEqual([remoteMachine.id]);
+    expect(state.selectedMachine).toEqual(localMachine);
+    expect(state.machines).toEqual([localMachine]);
+    expect(projects.loadProjects).not.toHaveBeenCalled();
+  });
+
   it("preserves the current machine state when adding a machine fails", async () => {
     let state: AppState = { ...initialAppState(), machines: [localMachine], selectedMachine: localMachine };
     const setState = (patch: Partial<AppState>) => { state = { ...state, ...patch }; };

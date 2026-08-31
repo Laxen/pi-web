@@ -1,13 +1,22 @@
 import { terminalsApi as defaultApi, type RunTerminalCommandInput, type TerminalCommandRun, type TerminalCommandRunFilter, type Workspace } from "../api";
+import type { NavigationSelection } from "../controllers/types";
 import type { TerminalCommandRunsInternalRuntime } from "../plugins/types";
 
 type TimerId = ReturnType<typeof globalThis.setTimeout>;
 type SetTimer = (handler: () => void, timeout: number) => TimerId;
 type ClearTimer = (id: TimerId) => void;
 
+export interface TerminalCommandNavigationContext {
+  readonly selection: NavigationSelection;
+  readonly tool: string | undefined;
+  readonly view: string | undefined;
+  readonly url: string;
+}
+
 export interface TerminalCommandRunsRuntimeDependencies {
   api?: Pick<typeof defaultApi, "runTerminalCommand" | "listCommandRuns" | "getCommandRun">;
-  openTerminal: (workspace: Workspace | undefined, options?: { terminalId?: string | undefined }) => void | Promise<void>;
+  captureNavigation?: () => TerminalCommandNavigationContext;
+  openTerminal: (workspace: Workspace | undefined, options?: { terminalId?: string | undefined }, expected?: TerminalCommandNavigationContext) => void | Promise<void>;
   pollIntervalMs?: number;
   setTimeout?: SetTimer;
   clearTimeout?: ClearTimer;
@@ -21,13 +30,21 @@ export function createTerminalCommandRunsRuntime(origin: string, deps: TerminalC
 
   return {
     async runCommand(input: RunTerminalCommandInput) {
+      const expected = deps.captureNavigation?.();
       const run = await api.runTerminalCommand(origin, input);
-      if (input.open === true) void deps.openTerminal(input.workspace, { terminalId: run.terminalId });
+      if (input.open === true) {
+        if (expected === undefined) void deps.openTerminal(input.workspace, { terminalId: run.terminalId });
+        else void deps.openTerminal(input.workspace, { terminalId: run.terminalId }, expected);
+      }
       return { run, completed: waitForCommandRunCompletion(run, api, pollIntervalMs, setTimer, clearTimer) };
     },
     listCommandRuns: (filter?: TerminalCommandRunFilter) => api.listCommandRuns(filter),
     getCommandRun: (runId: string) => api.getCommandRun(runId),
-    open: (options?: { terminalId?: string | undefined }) => { void deps.openTerminal(undefined, options); },
+    open: (options?: { terminalId?: string | undefined }) => {
+      const expected = deps.captureNavigation?.();
+      if (expected === undefined) void deps.openTerminal(undefined, options);
+      else void deps.openTerminal(undefined, options, expected);
+    },
   };
 }
 

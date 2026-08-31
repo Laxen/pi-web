@@ -252,6 +252,49 @@ describe("PiWebApp plugin host", () => {
     expect(appState(app).selectedSession?.id).toBe(nextSession.id);
   });
 
+  it("publishes a runtime terminal destination before recovering its workspace", async () => {
+    const previousProject: Project = { id: "project-old", name: "Old project", path: "/old", createdAt: "now" };
+    const nextProject: Project = { id: "project-next", name: "Next project", path: "/next", createdAt: "now" };
+    const previousWorkspace: Workspace = { id: "workspace-old", projectId: previousProject.id, path: "/old", label: "Old", isMain: true, effectiveConfig: {} };
+    const nextWorkspace: Workspace = { id: "workspace-next", projectId: nextProject.id, path: "/next", label: "Next", isMain: true, effectiveConfig: {} };
+    const browser = installBrowserWindow("http://localhost/app?project=project-old&workspace=workspace-old&view=chat");
+    const app = createApp();
+    setAppState(app, {
+      ...initialAppState(),
+      projects: [previousProject, nextProject],
+      selectedProject: previousProject,
+      workspaces: [previousWorkspace],
+      selectedWorkspace: previousWorkspace,
+      workspaceTool: "core:workspace.terminal",
+      mainView: "chat",
+    });
+
+    let workspaceAtCommit: string | undefined;
+    vi.spyOn(window.history, "pushState").mockImplementation((state, title, next) => {
+      workspaceAtCommit = appState(app).selectedWorkspace?.id;
+      window.history.replaceState(state, title, next);
+    });
+    if (!Reflect.set(app, "restoreRouteFor", () => {
+      setAppState(app, {
+        ...appState(app),
+        selectedProject: nextProject,
+        selectedWorkspace: nextWorkspace,
+        workspaces: [nextWorkspace],
+        selectedSession: undefined,
+      });
+      return Promise.resolve();
+    })) throw new Error("Could not stub runtime terminal route reconciliation");
+    if (!Reflect.set(app, "openTerminal", () => undefined)) throw new Error("Could not stub terminal opening");
+
+    await callAsyncAppMethod(app, "openRuntimeTerminal", "local", nextWorkspace, { terminalId: "terminal-next" });
+
+    expect(workspaceAtCommit).toBe(previousWorkspace.id);
+    expect(browser.url.searchParams.get("project")).toBe(nextProject.id);
+    expect(browser.url.searchParams.get("workspace")).toBe(nextWorkspace.id);
+    expect(browser.url.searchParams.get("view")).toBe("core:workspace.terminal");
+    expect(browser.url.searchParams.get("core.workspace.terminal--terminal")).toBe("terminal-next");
+  });
+
   it("does not let an older committed selection replace a newer URL destination", async () => {
     const projectA: Project = { id: "project-a", name: "Project A", path: "/a", createdAt: "now" };
     const projectB: Project = { id: "project-b", name: "Project B", path: "/b", createdAt: "now" };
@@ -981,6 +1024,27 @@ describe("PiWebApp plugin host", () => {
       "Failed to load PI WEB plugin files (./files/plugin.js)",
       failure,
     );
+  });
+
+  it("does not let a stale plugin refresh replace a newer view URL", async () => {
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&view=chat");
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceTool: "core:workspace.terminal",
+      mainView: "chat",
+    });
+    let resolveLoad!: (result: Awaited<ReturnType<typeof loadExternalPlugins>>) => void;
+    const load = new Promise<Awaited<ReturnType<typeof loadExternalPlugins>>>((resolve) => { resolveLoad = resolve; });
+    const refresh = callAppMethod(app, "registerExternalPlugins", "stale plugin", () => load);
+    browser.navigate("http://localhost/app?project=project-1&workspace=workspace-1&view=core%3Aworkspace.terminal");
+    resolveLoad({ registrations: [{ id: "stale", machineSpecific: false, plugin: emptyPlugin("Stale") }], failures: [] });
+    await refresh;
+
+    expect(browser.url.searchParams.get("view")).toBe("core:workspace.terminal");
   });
 
   it("keeps successful registrations while making an incomplete gateway load retryable", async () => {

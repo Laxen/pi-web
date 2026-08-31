@@ -170,7 +170,7 @@ function navigationSelection(state: ReturnType<GetState>): NavigationSelection {
     machineId: selectedMachineId(state),
     projectId: state.selectedProject?.id,
     workspaceId: state.selectedWorkspace?.id,
-    sessionId: state.selectedSession?.id,
+    ...(state.selectedSession === undefined || Reflect.get(state.selectedSession, "clientPendingStart") !== true ? { sessionId: state.selectedSession?.id } : {}),
   };
 }
 

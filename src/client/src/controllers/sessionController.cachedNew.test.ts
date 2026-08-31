@@ -126,6 +126,42 @@ describe("SessionController cached-new sessions", () => {
     clearStagedAttachments(sessionKey(replacementSession.id));
   });
 
+  it("publishes a command-result replacement before selecting its session", async () => {
+    let state: AppState = {
+      ...initialAppState(),
+      selectedWorkspace: workspace,
+      selectedSession: oldSession,
+      sessions: [oldSession],
+    };
+    const selectedAtNavigation: string[] = [];
+    const api: typeof defaultApi = {
+      ...defaultApi,
+      runCommand: () => Promise.resolve({ type: "done", message: "Session forked", session: replacementSession, promptDraft: "fork me" }),
+    };
+    const controller = new SessionController(
+      () => state,
+      (patch) => { state = { ...state, ...patch }; },
+      () => undefined,
+      undefined,
+      {
+        api,
+        socket: new FakeSocket(),
+        navigateToSession: (session, options) => {
+          selectedAtNavigation.push(state.selectedSession?.id ?? "missing");
+          expect(options?.expected?.sessionId).toBe(oldSession.id);
+          state = { ...state, selectedSession: session };
+          return Promise.resolve(true);
+        },
+      },
+    );
+
+    await controller.send("/fork");
+
+    expect(selectedAtNavigation).toEqual([oldSession.id]);
+    expect(state.selectedSession?.id).toBe(replacementSession.id);
+    expect(state.sessions[0]?.id).toBe(replacementSession.id);
+  });
+
   it("stores command prompt drafts for replacement sessions before selecting them", async () => {
     const storage = new MemoryStorage();
     Object.defineProperty(globalThis, "localStorage", { value: storage, configurable: true });
