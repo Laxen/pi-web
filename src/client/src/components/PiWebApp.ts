@@ -543,9 +543,32 @@ export class PiWebApp extends LitElement {
     window.location.reload();
   }
 
-  private async restoreRoute(updateUrl: boolean) {
-    await this.restoreRouteFor(readRoute(), updateUrl);
+  private async restoreRoute(
+    updateUrl: boolean,
+    restoredMainView?: AppState["mainView"],
+    urlPublication: WorkspaceRouteUrlPublication = "current-url",
+  ): Promise<boolean> {
+    const restore = this.restoreRouteFor(readRoute(), updateUrl, undefined, restoredMainView, urlPublication);
+    const restoreSeq = this.routeRestoreSeq;
+    await restore;
+    if (restoreSeq !== this.routeRestoreSeq) return false;
     this.rememberCurrentMachineNavigation();
+    return true;
+  }
+
+  /**
+   * Reconcile a route that has already been published by an imperative action.
+   * Navigation actions defer route normalization until the resolved selection is
+   * known; their final replace keeps the action's single history entry while
+   * the address bar remains the requested destination during every await.
+   */
+  private async restoreCommittedNavigation(snapshot: MachineNavigationSnapshot): Promise<boolean> {
+    return this.restoreRoute(false, snapshot.view, "deferred");
+  }
+
+  private async commitAndRestoreNavigation(snapshot: MachineNavigationSnapshot): Promise<boolean> {
+    this.commitMachineNavigationSnapshot(snapshot);
+    return this.restoreCommittedNavigation(snapshot);
   }
 
   private async restoreRouteFor(
@@ -593,7 +616,14 @@ export class PiWebApp extends LitElement {
       }
       const project = this.state.projects.find((p) => p.id === route.projectId);
       if (!project) {
-        this.setState({ selectedTerminalId: undefined });
+        // A requested project that cannot be resolved must not leave the prior
+        // project/session rendered underneath the new URL. Preserve an
+        // already-recorded load error so remembered remote destinations remain
+        // visible as an explicit recoverable error rather than being silently
+        // replaced by a fallback.
+        const error = this.state.error;
+        this.workspaces.clearSelection({ updateUrl: false });
+        this.setState({ selectedTerminalId: undefined, ...(error === "" ? {} : { error }) });
         await this.finishWorkspaceRouteRestore(emptyWorkspaceRouteSurface(), finishOptions);
         return;
       }
@@ -846,6 +876,13 @@ export class PiWebApp extends LitElement {
     this.commitMachineNavigationSnapshot(machineNavigationSnapshotFromState(this.state, contributionQuery), options);
   }
 
+  /** Replace a completed async destination without pairing a new route with an old surface query. */
+  private replaceNavigationUrl(
+    contributionQuery: Readonly<ContributionQueryRecord> = this.currentContributionQueryForState(),
+  ): void {
+    this.replaceMachineNavigationSnapshot(machineNavigationSnapshotFromState(this.state, contributionQuery));
+  }
+
   /**
    * The app shell is the sole owner of app navigation history writes. Callers
    * that already know the destination can publish a complete snapshot before
@@ -875,18 +912,39 @@ export class PiWebApp extends LitElement {
     return { machineId: machine.id, projectId: workspace.projectId, workspaceId: workspace.id };
   }
 
-  private writeMachineNavigationSnapshotToUrl(snapshot: MachineNavigationSnapshot, options?: { replace?: boolean | undefined }): void {
-    writeRoute(routeFromMachineNavigationSnapshot(snapshot), options);
-    this.writeWorkspaceRouteSurfaceToUrl(snapshot.surface);
+  private replaceMachineNavigationSnapshot(snapshot: MachineNavigationSnapshot): void {
+    this.machineNavigation.remember(snapshot);
+    const route = routeFromMachineNavigationSnapshot(snapshot);
+    const routeMatches = this.navigationRouteMatchesUrl(route);
+    if (!this.navigationSurfaceMatchesUrl(snapshot.surface)) this.writeWorkspaceRouteSurfaceToUrl(snapshot.surface);
+    if (!routeMatches) writeRoute(route, { replace: true });
+  }
+
+  private navigationRouteMatchesUrl(route: AppRoute): boolean {
+    const current = readRoute();
+    return (current.machineId ?? "local") === (route.machineId ?? "local")
+      && current.projectId === route.projectId
+      && current.workspaceId === route.workspaceId
+      && current.sessionId === route.sessionId
+      && current.tool === route.tool
+      && current.view === route.view;
+  }
+
+  private navigationSurfaceMatchesUrl(surface: WorkspaceRouteSurface): boolean {
+    return sameContributionQueryRecord(readContributionQueryRecord(), this.contributionQueryForWorkspaceRouteSurface(surface));
   }
 
   private writeWorkspaceRouteSurfaceToUrl(surface: WorkspaceRouteSurface): void {
+    writeContributionQueryRecord(this.contributionQueryForWorkspaceRouteSurface(surface), { replace: true });
+  }
+
+  private contributionQueryForWorkspaceRouteSurface(surface: WorkspaceRouteSurface): ContributionQueryRecord {
     const terminalParameter = `${TERMINAL_ROUTE_NAMESPACE}--terminal`;
     const contributionQuery: ContributionQueryRecord = Object.fromEntries(
       Object.entries(surface.contributionQuery ?? {}).filter(([key]) => key !== terminalParameter),
     );
     if (surface.selectedTerminalId !== undefined) contributionQuery[terminalParameter] = surface.selectedTerminalId;
-    writeContributionQueryRecord(contributionQuery, { replace: true });
+    return contributionQuery;
   }
 
   private async selectMachineWithMemory(machine: Machine, options: { rememberCurrent?: boolean } = {}): Promise<void> {
@@ -894,23 +952,54 @@ export class PiWebApp extends LitElement {
     if (options.rememberCurrent !== false && !this.routeRestoreInProgress) this.rememberCurrentMachineNavigation();
     const seq = ++this.machineNavigationRestoreSeq;
     const snapshot = this.machineNavigation.latest(machine.id) ?? emptyMachineNavigationSnapshot(machine.id);
-    await this.restoreRouteFor(
-      routeFromMachineNavigationSnapshot(snapshot),
-      false,
-      snapshot.surface,
-      snapshot.view,
-      "deferred",
-    );
+    if (!await this.commitAndRestoreNavigation(snapshot)) return;
     if (seq !== this.machineNavigationRestoreSeq || this.state.selectedMachine?.id !== machine.id) return;
     if (this.shouldPreserveUnrestoredMachineNavigation(snapshot)) {
-      this.machineNavigation.remember(snapshot);
-      this.writeMachineNavigationSnapshotToUrl(snapshot);
+      this.replaceMachineNavigationSnapshot(snapshot);
       return;
     }
     const restoredQuery = snapshot.projectId === this.state.selectedProject?.id && snapshot.workspaceId === this.state.selectedWorkspace?.id
       ? snapshot.surface.contributionQuery ?? {}
       : {};
-    this.updateUrl(undefined, restoredQuery);
+    this.replaceNavigationUrl(restoredQuery);
+  }
+
+  private async selectProjectFromNavigation(project: Project): Promise<void> {
+    const current = machineNavigationSnapshotFromState(this.state, this.currentContributionQueryForState());
+    const destination: MachineNavigationSnapshot = {
+      ...current,
+      projectId: project.id,
+      workspaceId: undefined,
+      sessionId: undefined,
+      surface: {},
+    };
+    if (!await this.commitAndRestoreNavigation(destination)) return;
+    this.replaceNavigationUrl();
+  }
+
+  private async selectWorkspaceFromNavigation(workspace: Workspace): Promise<void> {
+    const current = machineNavigationSnapshotFromState(this.state, this.currentContributionQueryForState());
+    const destination: MachineNavigationSnapshot = {
+      ...current,
+      projectId: workspace.projectId,
+      workspaceId: workspace.id,
+      sessionId: undefined,
+      surface: {},
+    };
+    if (!await this.commitAndRestoreNavigation(destination)) return;
+    this.replaceNavigationUrl();
+  }
+
+  private async selectSessionFromNavigation(session: SessionInfo): Promise<void> {
+    const current = machineNavigationSnapshotFromState(this.state, this.currentContributionQueryForState());
+    const workspace = this.state.selectedWorkspace;
+    const destination: MachineNavigationSnapshot = {
+      ...current,
+      ...(workspace === undefined ? {} : { projectId: workspace.projectId, workspaceId: workspace.id }),
+      sessionId: session.id,
+    };
+    if (!await this.commitAndRestoreNavigation(destination)) return;
+    this.replaceNavigationUrl();
   }
 
   private shouldPreserveUnrestoredMachineNavigation(snapshot: MachineNavigationSnapshot): boolean {
@@ -1363,13 +1452,13 @@ export class PiWebApp extends LitElement {
         .onToggleProjects=${() => { this.navigationSections.toggle("projects"); }}
         .onToggleWorkspaces=${() => { this.navigationSections.toggle("workspaces"); }}
         .onToggleSessions=${() => { this.navigationSections.toggle("sessions"); }}
-        .onSelectProject=${(project: Project) => this.selectNavigationItem("projects", "workspaces", () => this.workspaces.selectProject(project))}
+        .onSelectProject=${(project: Project) => this.selectNavigationItem("projects", "workspaces", () => this.selectProjectFromNavigation(project))}
         .onCloseProject=${(project: Project) => this.projects.closeProject(project.id)}
-        .onSelectWorkspace=${(workspace: Workspace) => this.selectNavigationItem("workspaces", "sessions", () => this.workspaces.selectWorkspace(workspace))}
+        .onSelectWorkspace=${(workspace: Workspace) => this.selectNavigationItem("workspaces", "sessions", () => this.selectWorkspaceFromNavigation(workspace))}
         .onDeleteWorkspace=${(workspace: Workspace) => { void this.deleteWorkspace(workspace); }}
         .onArchivedCollapsed=${() => { this.sessions.clearSelectionAfterArchivedCollapse(); }}
         .onStartSession=${() => this.startSessionFromNavigation()}
-        .onSelectSession=${(session: SessionInfo) => this.selectNavigationItem("sessions", "chat", () => this.sessions.selectSession(session))}
+        .onSelectSession=${(session: SessionInfo) => this.selectNavigationItem("sessions", "chat", () => this.selectSessionFromNavigation(session))}
         .onMarkSessionRead=${(session: SessionInfo) => { this.markSessionsRead([session]); }}
         .onMarkSessionsRead=${(sessions: SessionInfo[]) => { this.markSessionsRead(sessions); }}
         .onArchiveSession=${(session: SessionInfo) => this.sessions.archiveSession(session)}
@@ -2527,6 +2616,23 @@ function patchChangesState(state: AppState, patch: Partial<AppState>): boolean {
 
 function sameStringSet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
   return left.size === right.size && [...left].every((value) => right.has(value));
+}
+
+function sameContributionQueryRecord(left: Readonly<ContributionQueryRecord>, right: Readonly<ContributionQueryRecord>): boolean {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key) => Object.hasOwn(right, key) && sameContributionQueryValue(left[key], right[key]));
+}
+
+function sameContributionQueryValue(left: string | string[] | undefined, right: string | string[] | undefined): boolean {
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((value, index) => value === right[index]);
+  }
+  return left === right;
 }
 
 function isActive(state: Pick<AppState, "status" | "activity">): boolean {

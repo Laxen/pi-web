@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FilesRuntime } from "../../../../pi-web-plugins/files/FilesRuntime";
 import type { WorkspaceFilesCapabilityV1, WorkspacePanelContext as PublicWorkspacePanelContext } from "../../../plugin-api";
-import type { Machine, Project, Workspace } from "../api";
+import type { Machine, Project, SessionInfo, Workspace } from "../api";
 import { initialAppState } from "../appState";
 import type { MachineNavigationSnapshot } from "../controllers/machineNavigationMemory";
 import { loadExternalPlugins, type PluginManifestEntry } from "../plugins/external";
@@ -125,6 +125,165 @@ describe("PiWebApp plugin host", () => {
 
     expect(settingsAtCommit).toBeUndefined();
     expect(Reflect.get(app, "settingsSection")).toBe("plugins");
+  });
+
+  it("publishes a project destination before asynchronous route reconciliation", async () => {
+    const previousProject: Project = { id: "project-old", name: "Old project", path: "/old", createdAt: "now" };
+    const nextProject: Project = { id: "project-next", name: "Next project", path: "/next", createdAt: "now" };
+    const previousWorkspace: Workspace = { id: "workspace-old", projectId: previousProject.id, path: "/old", label: "Old", isMain: true, effectiveConfig: {} };
+    const previousSession: SessionInfo = { id: "session-old", cwd: previousWorkspace.path, path: "/old/.sessions/session-old", created: "now", modified: "now", messageCount: 0, firstMessage: "" };
+    const browser = installBrowserWindow("http://localhost/app?project=project-old&workspace=workspace-old&session=session-old");
+    const app = createApp();
+    setAppState(app, {
+      ...initialAppState(),
+      projects: [previousProject, nextProject],
+      selectedProject: previousProject,
+      workspaces: [previousWorkspace],
+      selectedWorkspace: previousWorkspace,
+      sessions: [previousSession],
+      selectedSession: previousSession,
+      workspaceTool: "core:workspace.terminal",
+      mainView: "chat",
+    });
+
+    let projectAtCommit: string | undefined;
+    vi.spyOn(window.history, "pushState").mockImplementation((state, title, next) => {
+      projectAtCommit = appState(app).selectedProject?.id;
+      window.history.replaceState(state, title, next);
+    });
+    stubCommittedRouteRestore(app, () => {
+      setAppState(app, {
+        ...appState(app),
+        selectedProject: nextProject,
+        selectedWorkspace: undefined,
+        workspaces: [],
+        selectedSession: undefined,
+        sessions: [],
+      });
+    });
+
+    await callAsyncAppMethod(app, "selectProjectFromNavigation", nextProject);
+
+    expect(projectAtCommit).toBe(previousProject.id);
+    expect(browser.url.searchParams.get("project")).toBe(nextProject.id);
+    expect(browser.url.searchParams.has("workspace")).toBe(false);
+    expect(browser.url.searchParams.has("session")).toBe(false);
+    expect(appState(app).selectedProject?.id).toBe(nextProject.id);
+  });
+
+  it("publishes a workspace destination before asynchronous session resolution", async () => {
+    const project: Project = { id: "project-1", name: "Project", path: "/repo", createdAt: "now" };
+    const previousWorkspace: Workspace = { id: "workspace-old", projectId: project.id, path: "/repo", label: "Old", isMain: true, effectiveConfig: {} };
+    const nextWorkspace: Workspace = { id: "workspace-next", projectId: project.id, path: "/repo-next", label: "Next", isMain: false, effectiveConfig: {} };
+    const previousSession: SessionInfo = { id: "session-old", cwd: previousWorkspace.path, path: "/repo/.sessions/session-old", created: "now", modified: "now", messageCount: 0, firstMessage: "" };
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-old&session=session-old&core.workspace.terminal--terminal=terminal-old");
+    const app = createApp();
+    setAppState(app, {
+      ...initialAppState(),
+      projects: [project],
+      selectedProject: project,
+      workspaces: [previousWorkspace, nextWorkspace],
+      selectedWorkspace: previousWorkspace,
+      sessions: [previousSession],
+      selectedSession: previousSession,
+      selectedTerminalId: "terminal-old",
+      workspaceTool: "core:workspace.terminal",
+      mainView: "chat",
+    });
+
+    let workspaceAtCommit: string | undefined;
+    vi.spyOn(window.history, "pushState").mockImplementation((state, title, next) => {
+      workspaceAtCommit = appState(app).selectedWorkspace?.id;
+      window.history.replaceState(state, title, next);
+    });
+    stubCommittedRouteRestore(app, () => {
+      setAppState(app, {
+        ...appState(app),
+        selectedWorkspace: nextWorkspace,
+        selectedTerminalId: undefined,
+        sessions: [],
+        selectedSession: undefined,
+      });
+    });
+
+    await callAsyncAppMethod(app, "selectWorkspaceFromNavigation", nextWorkspace);
+
+    expect(workspaceAtCommit).toBe(previousWorkspace.id);
+    expect(browser.url.searchParams.get("workspace")).toBe(nextWorkspace.id);
+    expect(browser.url.searchParams.has("session")).toBe(false);
+    expect(browser.url.searchParams.has("core.workspace.terminal--terminal")).toBe(false);
+    expect(appState(app).selectedWorkspace?.id).toBe(nextWorkspace.id);
+  });
+
+  it("publishes a session destination before asynchronous transcript reconciliation", async () => {
+    const project: Project = { id: "project-1", name: "Project", path: "/repo", createdAt: "now" };
+    const workspace: Workspace = { id: "workspace-1", projectId: project.id, path: "/repo", label: "Main", isMain: true, effectiveConfig: {} };
+    const previousSession: SessionInfo = { id: "session-old", cwd: workspace.path, path: "/repo/.sessions/session-old", created: "now", modified: "now", messageCount: 0, firstMessage: "" };
+    const nextSession: SessionInfo = { id: "session-next", cwd: workspace.path, path: "/repo/.sessions/session-next", created: "now", modified: "now", messageCount: 0, firstMessage: "" };
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&session=session-old&core.workspace.terminal--terminal=terminal-1");
+    const app = createApp();
+    setAppState(app, {
+      ...initialAppState(),
+      projects: [project],
+      selectedProject: project,
+      workspaces: [workspace],
+      selectedWorkspace: workspace,
+      sessions: [previousSession, nextSession],
+      selectedSession: previousSession,
+      selectedTerminalId: "terminal-1",
+      workspaceTool: "core:workspace.terminal",
+      mainView: "chat",
+    });
+
+    let sessionAtCommit: string | undefined;
+    vi.spyOn(window.history, "pushState").mockImplementation((state, title, next) => {
+      sessionAtCommit = appState(app).selectedSession?.id;
+      window.history.replaceState(state, title, next);
+    });
+    stubCommittedRouteRestore(app, () => {
+      setAppState(app, { ...appState(app), selectedSession: nextSession });
+    });
+
+    await callAsyncAppMethod(app, "selectSessionFromNavigation", nextSession);
+
+    expect(sessionAtCommit).toBe(previousSession.id);
+    expect(browser.url.searchParams.get("session")).toBe(nextSession.id);
+    expect(browser.url.searchParams.get("core.workspace.terminal--terminal")).toBe("terminal-1");
+    expect(appState(app).selectedSession?.id).toBe(nextSession.id);
+  });
+
+  it("does not let an older committed selection replace a newer URL destination", async () => {
+    const projectA: Project = { id: "project-a", name: "Project A", path: "/a", createdAt: "now" };
+    const projectB: Project = { id: "project-b", name: "Project B", path: "/b", createdAt: "now" };
+    const app = createApp();
+    setAppState(app, { ...initialAppState(), projects: [projectA, projectB], selectedProject: projectA });
+    const restores: { resolve: () => void; apply: () => void }[] = [];
+    if (!Reflect.set(app, "restoreRouteFor", (route: { projectId?: string }) => {
+      const currentSeq: unknown = Reflect.get(app, "routeRestoreSeq");
+      if (typeof currentSeq !== "number") throw new Error("PiWebApp route restore sequence was unavailable");
+      const nextSeq = currentSeq + 1;
+      if (!Reflect.set(app, "routeRestoreSeq", nextSeq)) throw new Error("Could not advance route restore sequence");
+      const project = route.projectId === projectA.id ? projectA : projectB;
+      return new Promise<void>((resolve) => {
+        restores.push({
+          resolve,
+          apply: () => { setAppState(app, { ...appState(app), selectedProject: project }); },
+        });
+      });
+    })) throw new Error("Could not stub committed route reconciliation");
+
+    const first = callAsyncAppMethod(app, "selectProjectFromNavigation", projectA);
+    const second = callAsyncAppMethod(app, "selectProjectFromNavigation", projectB);
+    await vi.waitFor(() => { expect(restores).toHaveLength(2); });
+    restores[0]?.apply();
+    restores[0]?.resolve();
+    await Promise.resolve();
+    expect(new URL(window.location.href).searchParams.get("project")).toBe(projectB.id);
+    restores[1]?.apply();
+    restores[1]?.resolve();
+    await Promise.all([first, second]);
+
+    expect(new URL(window.location.href).searchParams.get("project")).toBe(projectB.id);
   });
 
   it("routes selected-panel, route, activity, and refresh-current invalidation through the generic seam", async () => {
@@ -417,8 +576,8 @@ describe("PiWebApp plugin host", () => {
 
     expect(toBSettled).toBe(false);
     expect(contextB.navigation?.query).toEqual({ file: "b.ts", mode: "preview" });
-    expect(browser.url.searchParams.get("project")).toBe(projectA.id);
-    expect(browser.url.searchParams.get("core.workspace.files--file")).toBe("a.ts");
+    expect(browser.url.searchParams.get("project")).toBe(projectB.id);
+    expect(browser.url.searchParams.get("files.workspace.files--file")).toBe("b.ts");
     resolveRead(0);
     await toB;
 
@@ -440,8 +599,9 @@ describe("PiWebApp plugin host", () => {
 
     expect(toASettled).toBe(false);
     expect(contextA.navigation?.query).toEqual({ file: "a.ts", mode: "raw" });
-    expect(browser.url.searchParams.get("machine")).toBe(machineB.id);
-    expect(browser.url.searchParams.get("files.workspace.files--file")).toBe("b.ts");
+    expect(browser.url.searchParams.has("machine")).toBe(false);
+    expect(browser.url.searchParams.get("project")).toBe(projectA.id);
+    expect(browser.url.searchParams.get("core.workspace.files--file")).toBe("a.ts");
     resolveRead(1);
     await toA;
 
@@ -518,7 +678,7 @@ describe("PiWebApp plugin host", () => {
     });
     expect(window.history.length).toBe(historyLength + 1);
     expect(browser.pushed).toHaveLength(1);
-    expect(browser.replaced).toHaveLength(1);
+    expect(browser.replaced).toHaveLength(2);
     expect([...browser.pushed, ...browser.replaced].every((href) => new URL(href).searchParams.get("machine") === machineB.id)).toBe(true);
     expect(browser.url.searchParams.get("files.workspace.files--file")).toBe("b.ts");
 
@@ -914,8 +1074,8 @@ function installBrowserWindow(href: string): {
   readonly replaced: string[];
   navigate(next: string): void;
 } {
-  const originalPush = window.history.pushState.bind(window.history);
-  const originalReplace = window.history.replaceState.bind(window.history);
+  const originalPush = History.prototype.pushState.bind(window.history);
+  const originalReplace = History.prototype.replaceState.bind(window.history);
   const appRelativeUrl = (target: string) => {
     const url = new URL(target, window.location.href);
     return `${url.pathname}${url.search}${url.hash}`;
@@ -1091,6 +1251,13 @@ function stubRouteMachineSelection(app: PiWebApp, applySelection: () => void): v
     applySelection();
     return Promise.resolve();
   })) throw new Error("Could not stub machine route selection");
+}
+
+function stubCommittedRouteRestore(app: PiWebApp, applySelection: () => void): void {
+  if (!Reflect.set(app, "restoreRouteFor", () => {
+    applySelection();
+    return Promise.resolve();
+  })) throw new Error("Could not stub committed route reconciliation");
 }
 
 function stubWorkspaceProjectSelection(app: PiWebApp, applySelection: () => void): void {
