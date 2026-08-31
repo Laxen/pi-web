@@ -38,6 +38,95 @@ afterEach(() => {
 });
 
 describe("PiWebApp plugin host", () => {
+  it("commits a workspace view destination before applying the rendered selection", () => {
+    installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.terminal&view=chat");
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceTool: "core:workspace.terminal",
+      mainView: "chat",
+    });
+
+    let mainViewAtCommit: ReturnType<typeof initialAppState>["mainView"] | undefined;
+    vi.spyOn(window.history, "pushState").mockImplementation((state, title, next) => {
+      mainViewAtCommit = appState(app).mainView;
+      // The browser helper already owns the real push implementation; use a
+      // replace here so this test can observe ordering without nesting spies.
+      window.history.replaceState(state, title, next);
+    });
+
+    callAppMethod(app, "openWorkspaceTool", "core:workspace.terminal");
+
+    expect(mainViewAtCommit).toBe("chat");
+    expect(new URL(window.location.href).searchParams.get("view")).toBe("core:workspace.terminal");
+    expect(appState(app).mainView).toBe("core:workspace.terminal");
+  });
+
+  it("commits a main-view destination before applying the rendered selection", () => {
+    installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.terminal&view=core%3Aworkspace.terminal");
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceTool: "core:workspace.terminal",
+      mainView: "core:workspace.terminal",
+    });
+
+    let mainViewAtCommit: ReturnType<typeof initialAppState>["mainView"] | undefined;
+    vi.spyOn(window.history, "pushState").mockImplementation((state, title, next) => {
+      mainViewAtCommit = appState(app).mainView;
+      window.history.replaceState(state, title, next);
+    });
+
+    callAppMethod(app, "selectMainView", "chat");
+
+    expect(mainViewAtCommit).toBe("core:workspace.terminal");
+    expect(new URL(window.location.href).searchParams.get("view")).toBe("chat");
+    expect(appState(app).mainView).toBe("chat");
+  });
+
+  it("commits terminal selection before applying the rendered selection", () => {
+    installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&core.workspace.terminal--terminal=old-terminal");
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      selectedTerminalId: "old-terminal",
+    });
+
+    let terminalAtCommit: string | undefined;
+    vi.spyOn(window.history, "replaceState").mockImplementation(() => {
+      terminalAtCommit = appState(app).selectedTerminalId;
+    });
+
+    callAppMethod(app, "selectTerminal", "new-terminal", { replace: true });
+
+    expect(terminalAtCommit).toBe("old-terminal");
+    expect(appState(app).selectedTerminalId).toBe("new-terminal");
+  });
+
+  it("commits settings navigation before applying the rendered dialog", () => {
+    installBrowserWindow("http://localhost/app");
+    const app = new PiWebApp();
+
+    let settingsAtCommit: unknown;
+    vi.spyOn(window.history, "pushState").mockImplementation(() => {
+      settingsAtCommit = Reflect.get(app, "settingsSection");
+    });
+
+    callAppMethod(app, "openSettings", "plugins");
+
+    expect(settingsAtCommit).toBeUndefined();
+    expect(Reflect.get(app, "settingsSection")).toBe("plugins");
+  });
+
   it("routes selected-panel, route, activity, and refresh-current invalidation through the generic seam", async () => {
     const app = createApp();
     setAppState(app, {

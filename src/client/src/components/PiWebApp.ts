@@ -843,7 +843,15 @@ export class PiWebApp extends LitElement {
     options?: { replace?: boolean | undefined },
     contributionQuery: Readonly<ContributionQueryRecord> = this.currentContributionQueryForState(),
   ): void {
-    const snapshot = machineNavigationSnapshotFromState(this.state, contributionQuery);
+    this.commitMachineNavigationSnapshot(machineNavigationSnapshotFromState(this.state, contributionQuery), options);
+  }
+
+  /**
+   * The app shell is the sole owner of app navigation history writes. Callers
+   * that already know the destination can publish a complete snapshot before
+   * applying its corresponding UI state.
+   */
+  private commitMachineNavigationSnapshot(snapshot: MachineNavigationSnapshot, options?: { replace?: boolean | undefined }): void {
     this.machineNavigation.remember(snapshot);
     writeRoute(routeFromMachineNavigationSnapshot(snapshot), options);
     this.writeWorkspaceRouteSurfaceToUrl(snapshot.surface);
@@ -913,8 +921,9 @@ export class PiWebApp extends LitElement {
     const availableTool = this.availableWorkspacePanelId(tool);
     if (availableTool === undefined) return;
     if (availableTool === "core:workspace.terminal") this.terminalAutoStartWorkspaceId = this.state.selectedWorkspace?.id;
+    const currentSnapshot = machineNavigationSnapshotFromState(this.state, this.currentContributionQueryForState());
+    this.commitMachineNavigationSnapshot({ ...currentSnapshot, tool: availableTool, view: availableTool });
     this.setState({ workspaceTool: availableTool, mainView: availableTool });
-    this.updateUrl();
     this.refreshSelectedWorkspaceTool(availableTool);
   }
 
@@ -960,9 +969,12 @@ export class PiWebApp extends LitElement {
 
   private selectTerminal(terminalId: string | undefined, options?: { replace?: boolean | undefined }): void {
     this.rememberSelectedTerminal(terminalId);
+    // The address bar is the destination for this synchronous surface change;
+    // publish it before the rendered selection changes so observers never see
+    // the new selection paired with the old URL.
+    this.writeSelectedTerminalToUrl(terminalId, options);
     this.setState({ selectedTerminalId: terminalId });
     this.rememberCurrentMachineNavigation();
-    this.writeSelectedTerminalToUrl(terminalId, options);
   }
 
   private rememberSelectedTerminal(terminalId: string | undefined): void {
@@ -985,23 +997,24 @@ export class PiWebApp extends LitElement {
       this.openWorkspaceTool(view);
       return;
     }
+    const currentSnapshot = machineNavigationSnapshotFromState(this.state, this.currentContributionQueryForState());
+    this.commitMachineNavigationSnapshot({ ...currentSnapshot, view });
     this.setState({ mainView: view });
-    this.updateUrl();
   }
 
   private openSettings(section: SettingsSection = "general"): void {
-    this.settingsSection = section;
     writeSettingsSection(section);
+    this.settingsSection = section;
   }
 
   private closeSettings(): void {
-    this.settingsSection = undefined;
     writeSettingsSection(undefined);
+    this.settingsSection = undefined;
   }
 
   private navigateSettings(section: SettingsSection): void {
-    this.settingsSection = section;
     writeSettingsSection(section);
+    this.settingsSection = section;
   }
 
   private restoreSettingsRoute(): void {
