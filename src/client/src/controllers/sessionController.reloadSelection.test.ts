@@ -89,6 +89,32 @@ describe("SessionController reload and selection", () => {
     expect(state.error).toBe("");
   });
 
+  it("routes archived-section collapse through the navigation boundary", async () => {
+    const archivedSession = { ...oldSession, archived: true, archivedAt: "later" };
+    let state: AppState = { ...initialAppState(), selectedWorkspace: workspace, sessions: [archivedSession], selectedSession: archivedSession };
+    const selectedAtNavigation: string[] = [];
+    const controller = new SessionController(
+      () => state,
+      (patch) => { state = { ...state, ...patch }; },
+      () => undefined,
+      new InMemorySessionSelectionMemory(),
+      {
+        api: { ...defaultApi, messages: () => Promise.resolve(emptyPage) },
+        socket: new FakeSocket(),
+        navigateToSession: (session, options) => {
+          selectedAtNavigation.push(`${state.selectedSession?.id ?? "none"}:${options?.expected?.sessionId ?? "none"}`);
+          state = { ...state, selectedSession: session };
+          return Promise.resolve(true);
+        },
+      },
+    );
+
+    await controller.clearSelectionAfterArchivedCollapse();
+
+    expect(selectedAtNavigation).toEqual([`${archivedSession.id}:${archivedSession.id}`]);
+    expect(state.selectedSession).toBeUndefined();
+  });
+
   it("forgets archived selections when the archived section collapse clears selection", async () => {
     const archivedSession = { ...oldSession, archived: true, archivedAt: "later" };
     let state: AppState = { ...initialAppState(), selectedWorkspace: workspace, sessions: [archivedSession] };
@@ -108,7 +134,7 @@ describe("SessionController reload and selection", () => {
     await controller.selectSession(archivedSession, { updateUrl: false });
     expect(controller.preferredSession(workspace.path, state.sessions, undefined)).toBe(archivedSession);
 
-    controller.clearSelectionAfterArchivedCollapse();
+    await controller.clearSelectionAfterArchivedCollapse();
 
     expect(state.selectedSession).toBeUndefined();
     expect(controller.preferredSession(workspace.path, state.sessions, undefined)).toBeUndefined();

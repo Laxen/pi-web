@@ -15,11 +15,13 @@ export interface ProjectTrustChoice {
 export interface ProjectControllerDependencies {
   api?: Pick<typeof defaultApi, "projects" | "addProject" | "closeProject" | "setWorkspaceTrust">;
   navigateToProject?: (project: Project | undefined, options?: NavigationDestinationOptions) => Promise<boolean>;
+  captureNavigation?: () => NavigationSelection;
 }
 
 export class ProjectController {
   private readonly api: Pick<typeof defaultApi, "projects" | "addProject" | "closeProject" | "setWorkspaceTrust">;
   private readonly navigateToProject: ProjectControllerDependencies["navigateToProject"];
+  private readonly captureNavigation: ProjectControllerDependencies["captureNavigation"];
 
   constructor(
     private readonly getState: GetState,
@@ -29,6 +31,7 @@ export class ProjectController {
   ) {
     this.api = deps.api ?? defaultApi;
     this.navigateToProject = deps.navigateToProject;
+    this.captureNavigation = deps.captureNavigation;
   }
 
   async loadProjects() {
@@ -50,15 +53,16 @@ export class ProjectController {
   async addProject(path: string, create?: boolean, trustChoice?: ProjectTrustChoice) {
     if (path.trim() === "") return;
     const machineId = selectedMachineId(this.getState());
-    const expected = navigationSelection(this.getState());
+    const expected = navigationSelection(this.getState(), this.captureNavigation);
     try {
       const project = await this.api.addProject(path.trim(), undefined, create, machineId);
       if (selectedMachineId(this.getState()) !== machineId) return;
       const projects = this.getState().projects;
       this.setState({ projects: [...projects.filter((p) => p.id !== project.id), project], projectDialogOpen: false });
-      if (this.navigateToProject !== undefined) await this.navigateToProject(project, { expected });
+      let navigated = true;
+      if (this.navigateToProject !== undefined) navigated = await this.navigateToProject(project, { expected });
       else await this.workspaces.selectProject(project);
-      if (trustChoice?.changed === true) {
+      if (navigated && trustChoice?.changed === true) {
         await this.applyTrustChoice(project, trustChoice.trusted, machineId);
       }
     } catch (error) {
@@ -73,14 +77,15 @@ export class ProjectController {
    * keeps its default trust.
    */
   private async applyTrustChoice(project: Project, trusted: boolean, machineId: string): Promise<void> {
-    const mainWorkspace = this.getState().workspaces.find((workspace) => workspace.isMain);
+    const state = this.getState();
+    if (selectedMachineId(state) !== machineId || state.selectedProject?.id !== project.id) return;
+    const mainWorkspace = state.workspaces.find((workspace) => workspace.projectId === project.id && workspace.isMain);
     if (mainWorkspace === undefined) return;
     await this.api.setWorkspaceTrust(project.id, mainWorkspace.id, trusted, machineId);
   }
 
   async closeProject(projectId: string) {
     const machineId = selectedMachineId(this.getState());
-    const expected = navigationSelection(this.getState());
     try {
       await this.api.closeProject(projectId, machineId);
       if (selectedMachineId(this.getState()) !== machineId) return;
@@ -89,6 +94,7 @@ export class ProjectController {
       const wasSelected = state.selectedProject?.id === projectId;
       this.setState({ projects: state.projects.filter((p) => p.id !== projectId) });
       if (!wasSelected) return;
+      const expected = navigationSelection(this.getState(), this.captureNavigation);
       if (this.navigateToProject !== undefined) await this.navigateToProject(undefined, { expected });
       else this.workspaces.clearSelection();
     } catch (error) {
@@ -97,8 +103,8 @@ export class ProjectController {
   }
 }
 
-function navigationSelection(state: ReturnType<GetState>): NavigationSelection {
-  return {
+function navigationSelection(state: ReturnType<GetState>, captureNavigation?: () => NavigationSelection): NavigationSelection {
+  return captureNavigation?.() ?? {
     machineId: selectedMachineId(state),
     projectId: state.selectedProject?.id,
     workspaceId: state.selectedWorkspace?.id,

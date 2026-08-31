@@ -46,6 +46,46 @@ describe("ProjectController", () => {
     });
   });
 
+  it("follows a close when the user selects the project before the request settles", async () => {
+    const closingProject = project("closing", "/closing");
+    const otherProject = project("other", "/other");
+    let state: AppState = {
+      ...initialAppState(),
+      projects: [closingProject, otherProject],
+      selectedProject: otherProject,
+    };
+    let resolveClose: (() => void) | undefined;
+    const closeRequest = new Promise<{ closed: true }>((resolve) => { resolveClose = () => { resolve({ closed: true }); }; });
+    const selectedAtNavigation: string[] = [];
+    const controller = new ProjectController(
+      () => state,
+      (patch) => { state = { ...state, ...patch }; },
+      { selectProject: vi.fn(), forgetProject: vi.fn(), clearSelection: vi.fn() },
+      {
+        api: {
+          projects: vi.fn(),
+          addProject: vi.fn(),
+          closeProject: () => closeRequest,
+          setWorkspaceTrust: vi.fn(),
+        },
+        navigateToProject: (next, options) => {
+          selectedAtNavigation.push(`${state.selectedProject?.id ?? "none"}:${options?.expected?.projectId ?? "none"}`);
+          state = { ...state, selectedProject: next };
+          return Promise.resolve(true);
+        },
+      },
+    );
+
+    const close = controller.closeProject(closingProject.id);
+    state = { ...state, selectedProject: closingProject };
+    resolveClose?.();
+    await close;
+
+    expect(selectedAtNavigation).toEqual([`${closingProject.id}:${closingProject.id}`]);
+    expect(state.selectedProject).toBeUndefined();
+    expect(state.projects).toEqual([otherProject]);
+  });
+
   it("closes the project dialog before selecting the project it added", async () => {
     const addedProject = project("added", "/added");
     let state: AppState = { ...initialAppState(), projectDialogOpen: true };
@@ -112,7 +152,7 @@ describe("ProjectController", () => {
     let state: AppState = { ...initialAppState(), projectDialogOpen: true };
     const setWorkspaceTrust = vi.fn().mockResolvedValue({ path: "/added", decision: true, trusted: true });
     const selectProject = vi.fn((): Promise<void> => {
-      state = { ...state, workspaces: [addedWorkspace] };
+      state = { ...state, selectedProject: addedProject, workspaces: [addedWorkspace] };
       return Promise.resolve();
     });
     const controller = new ProjectController(
@@ -133,6 +173,64 @@ describe("ProjectController", () => {
 
     expect(setWorkspaceTrust).toHaveBeenCalledOnce();
     expect(setWorkspaceTrust).toHaveBeenCalledWith(addedProject.id, addedWorkspace.id, true, "local");
+  });
+
+  it("does not write trust after navigation declines the added project", async () => {
+    const addedProject = project("added", "/added");
+    let state: AppState = { ...initialAppState(), projectDialogOpen: true };
+    const setWorkspaceTrust = vi.fn();
+    const controller = new ProjectController(
+      () => state,
+      (patch) => { state = { ...state, ...patch }; },
+      { selectProject: vi.fn(), forgetProject: vi.fn(), clearSelection: vi.fn() },
+      {
+        api: {
+          projects: vi.fn(),
+          addProject: vi.fn().mockResolvedValue(addedProject),
+          closeProject: vi.fn(),
+          setWorkspaceTrust,
+        },
+        navigateToProject: vi.fn().mockResolvedValue(false),
+      },
+    );
+
+    await controller.addProject("/added", true, { trusted: true, changed: true });
+
+    expect(setWorkspaceTrust).not.toHaveBeenCalled();
+  });
+
+  it("does not trust a workspace from an unrelated project after navigation", async () => {
+    const addedProject = project("added", "/added");
+    const unrelatedProject = project("unrelated", "/unrelated");
+    const unrelatedWorkspace = workspace(unrelatedProject.id, unrelatedProject.path);
+    let state: AppState = {
+      ...initialAppState(),
+      projectDialogOpen: true,
+      selectedProject: unrelatedProject,
+      workspaces: [unrelatedWorkspace],
+    };
+    const setWorkspaceTrust = vi.fn();
+    const controller = new ProjectController(
+      () => state,
+      (patch) => { state = { ...state, ...patch }; },
+      { selectProject: vi.fn(), forgetProject: vi.fn(), clearSelection: vi.fn() },
+      {
+        api: {
+          projects: vi.fn(),
+          addProject: vi.fn().mockResolvedValue(addedProject),
+          closeProject: vi.fn(),
+          setWorkspaceTrust,
+        },
+        navigateToProject: () => {
+          state = { ...state, selectedProject: addedProject };
+          return Promise.resolve(true);
+        },
+      },
+    );
+
+    await controller.addProject("/added", true, { trusted: true, changed: true });
+
+    expect(setWorkspaceTrust).not.toHaveBeenCalled();
   });
 
   it("does not write trust when the dialog choice was not touched", async () => {

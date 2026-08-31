@@ -9,12 +9,14 @@ export type GetState = () => AppState;
 export type SetState = (patch: Partial<AppState>) => void;
 export type UpdateUrl = (options?: { replace?: boolean | undefined }) => void;
 
-/** Navigation identity captured before an async operation begins. */
+/** Navigation identity captured before an async operation begins, including the visible route. */
 export interface NavigationSelection {
   machineId: string;
   projectId?: string | undefined;
   workspaceId?: string | undefined;
   sessionId?: string | undefined;
+  tool?: string | undefined;
+  view?: string | undefined;
 }
 
 export interface NavigationDestinationOptions {

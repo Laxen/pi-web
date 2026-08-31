@@ -12,6 +12,7 @@ const WORKSPACE_TOPOLOGY_REFRESH_DEBOUNCE_MS = 50;
 export interface WorkspaceControllerDependencies {
   api?: Pick<typeof defaultApi, "sessions" | "workspaces">;
   navigateToWorkspace?: (workspace: Workspace | undefined, options?: NavigationDestinationOptions) => Promise<boolean>;
+  captureNavigation?: () => NavigationSelection;
   onBackgroundError?: (message: string, error: unknown) => void;
   topologyRefreshDebounceMs?: number;
 }
@@ -19,6 +20,7 @@ export interface WorkspaceControllerDependencies {
 export class WorkspaceController {
   private readonly api: Pick<typeof defaultApi, "sessions" | "workspaces">;
   private readonly navigateToWorkspace: WorkspaceControllerDependencies["navigateToWorkspace"];
+  private readonly captureNavigation: WorkspaceControllerDependencies["captureNavigation"];
   private readonly onBackgroundError: (message: string, error: unknown) => void;
   private readonly topologyRefreshes: TrailingRefreshCoordinator<string>;
 
@@ -32,6 +34,7 @@ export class WorkspaceController {
   ) {
     this.api = deps.api ?? defaultApi;
     this.navigateToWorkspace = deps.navigateToWorkspace;
+    this.captureNavigation = deps.captureNavigation;
     this.onBackgroundError = deps.onBackgroundError ?? ((message, error) => { console.warn(message, error); });
     this.topologyRefreshes = new TrailingRefreshCoordinator(
       deps.topologyRefreshDebounceMs ?? WORKSPACE_TOPOLOGY_REFRESH_DEBOUNCE_MS,
@@ -127,11 +130,12 @@ export class WorkspaceController {
   }
 
   async refreshAfterWorkspaceDeleted(projectId: string, workspaceId: string): Promise<void> {
-    const expected = navigationSelection(this.getState());
+    const machineId = selectedMachineId(this.getState());
     const workspaces = await this.refreshProjectWorkspaces(projectId);
     const state = this.getState();
-    if (selectedMachineId(state) !== expected.machineId || state.selectedProject?.id !== projectId || state.selectedWorkspace?.id !== workspaceId) return;
+    if (selectedMachineId(state) !== machineId || state.selectedProject?.id !== projectId || state.selectedWorkspace?.id !== workspaceId) return;
 
+    const expected = navigationSelection(this.getState(), this.captureNavigation);
     const fallback = selectFallbackWorkspace(workspaces);
     if (this.navigateToWorkspace !== undefined) {
       await this.navigateToWorkspace(fallback, { expected });
@@ -165,8 +169,8 @@ export class WorkspaceController {
   }
 }
 
-function navigationSelection(state: ReturnType<GetState>): NavigationSelection {
-  return {
+function navigationSelection(state: ReturnType<GetState>, captureNavigation?: () => NavigationSelection): NavigationSelection {
+  return captureNavigation?.() ?? {
     machineId: selectedMachineId(state),
     projectId: state.selectedProject?.id,
     workspaceId: state.selectedWorkspace?.id,

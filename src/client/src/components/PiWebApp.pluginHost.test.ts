@@ -295,6 +295,120 @@ describe("PiWebApp plugin host", () => {
     expect(browser.url.searchParams.get("core.workspace.terminal--terminal")).toBe("terminal-next");
   });
 
+  it("does not open an older terminal after a newer surface query arrives during recovery", async () => {
+    const browser = installBrowserWindow("http://localhost/app?project=project-old&workspace=workspace-old&view=chat");
+    const app = createApp();
+    const previousProject: Project = { id: "project-old", name: "Old project", path: "/old", createdAt: "now" };
+    const nextProject: Project = { id: "project-next", name: "Next project", path: "/next", createdAt: "now" };
+    const previousWorkspace: Workspace = { id: "workspace-old", projectId: previousProject.id, path: "/old", label: "Old", isMain: true, effectiveConfig: {} };
+    const nextWorkspace: Workspace = { id: "workspace-next", projectId: nextProject.id, path: "/next", label: "Next", isMain: true, effectiveConfig: {} };
+    setAppState(app, {
+      ...initialAppState(),
+      projects: [previousProject, nextProject],
+      selectedProject: previousProject,
+      workspaces: [previousWorkspace],
+      selectedWorkspace: previousWorkspace,
+      workspaceTool: "core:workspace.terminal",
+      mainView: "chat",
+    });
+    let resolveRestore: (() => void) | undefined;
+    let restoreStarted = false;
+    const restore = new Promise<void>((resolve) => { resolveRestore = resolve; });
+    if (!Reflect.set(app, "restoreRouteFor", () => {
+      restoreStarted = true;
+      return restore;
+    })) throw new Error("Could not stub terminal route recovery");
+    const openTerminal = vi.fn();
+    if (!Reflect.set(app, "openTerminal", openTerminal)) throw new Error("Could not stub terminal opening");
+
+    const opening = callAsyncAppMethod(app, "openRuntimeTerminal", "local", nextWorkspace, { terminalId: "terminal-old" });
+    await vi.waitFor(() => { expect(restoreStarted).toBe(true); });
+    browser.navigate("http://localhost/app?project=project-next&workspace=workspace-next&view=core%3Aworkspace.terminal&core.workspace.terminal--terminal=terminal-new");
+    resolveRestore?.();
+    await opening;
+
+    expect(openTerminal).not.toHaveBeenCalled();
+    expect(browser.url.searchParams.get("core.workspace.terminal--terminal")).toBe("terminal-new");
+  });
+
+  it("keeps a newer contribution query when remembered machine navigation settles", async () => {
+    const browser = installBrowserWindow("http://localhost/app?project=project-a&workspace=workspace-a&view=chat");
+    const app = createApp();
+    const machineA: Machine = { id: "local", name: "Machine A", kind: "local", createdAt: "now", updatedAt: "now" };
+    const machineB: Machine = { id: "remote-b", name: "Machine B", kind: "remote", createdAt: "now", updatedAt: "now" };
+    const projectA: Project = { id: "project-a", name: "Project A", path: "/repo-a", createdAt: "now" };
+    const projectB: Project = { id: "project-b", name: "Project B", path: "/repo-b", createdAt: "now" };
+    const workspaceA: Workspace = { id: "workspace-a", projectId: projectA.id, path: "/repo-a", label: "A", isMain: true, effectiveConfig: {} };
+    const workspaceB: Workspace = { id: "workspace-b", projectId: projectB.id, path: "/repo-b", label: "B", isMain: true, effectiveConfig: {} };
+    setAppState(app, {
+      ...initialAppState(),
+      machines: [machineA, machineB],
+      selectedMachine: machineA,
+      projects: [projectA],
+      selectedProject: projectA,
+      workspaces: [workspaceA],
+      selectedWorkspace: workspaceA,
+      workspaceTool: "core:workspace.terminal",
+      mainView: "chat",
+    });
+    rememberMachineNavigationSnapshot(app, {
+      machineId: machineB.id,
+      projectId: projectB.id,
+      workspaceId: workspaceB.id,
+      tool: "core:workspace.terminal",
+      view: "chat",
+      surface: { contributionQuery: { "browser-only.workspace.panel--file": "old.ts" } },
+    });
+    let resolveRestore: (() => void) | undefined;
+    let restoreStarted = false;
+    const restore = new Promise<void>((resolve) => { resolveRestore = resolve; });
+    if (!Reflect.set(app, "restoreRouteFor", () => {
+      restoreStarted = true;
+      setAppState(app, {
+        ...appState(app),
+        selectedMachine: machineB,
+        projects: [projectB],
+        selectedProject: projectB,
+        workspaces: [workspaceB],
+        selectedWorkspace: workspaceB,
+        selectedSession: undefined,
+        error: "",
+      });
+      return restore;
+    })) throw new Error("Could not stub machine route recovery");
+
+    const navigation = callAsyncAppMethod(app, "selectMachineWithMemory", machineB);
+    await vi.waitFor(() => { expect(restoreStarted).toBe(true); });
+    browser.navigate("http://localhost/app?machine=remote-b&project=project-b&workspace=workspace-b&view=chat&browser-only.workspace.panel--file=new.ts");
+    resolveRestore?.();
+    await navigation;
+
+    expect(browser.url.searchParams.get("browser-only.workspace.panel--file")).toBe("new.ts");
+  });
+
+  it("normalizes a missing project route while clearing its workspace surface", async () => {
+    const browser = installBrowserWindow("http://localhost/app?project=missing-project&workspace=missing-workspace&view=chat&browser-only.workspace.panel--file=missing.ts");
+    const app = createApp();
+    setAppState(app, {
+      ...initialAppState(),
+      projects: [project],
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceTool: "core:workspace.terminal",
+      mainView: "chat",
+    });
+    markPluginLoadingReady(app);
+
+    await callAsyncAppMethod(app, "restoreRoute", false);
+
+    expect(appState(app).selectedProject).toBeUndefined();
+    expect(appState(app).selectedWorkspace).toBeUndefined();
+    expect(browser.url.searchParams.has("project")).toBe(false);
+    expect(browser.url.searchParams.has("workspace")).toBe(false);
+    expect(browser.url.searchParams.has("browser-only.workspace.panel--file")).toBe(false);
+  });
+
   it("does not let an older committed selection replace a newer URL destination", async () => {
     const projectA: Project = { id: "project-a", name: "Project A", path: "/a", createdAt: "now" };
     const projectB: Project = { id: "project-b", name: "Project B", path: "/b", createdAt: "now" };
@@ -327,6 +441,33 @@ describe("PiWebApp plugin host", () => {
     await Promise.all([first, second]);
 
     expect(new URL(window.location.href).searchParams.get("project")).toBe(projectB.id);
+  });
+
+  it("rejects an async navigation whose tool/view origin changed in the URL", async () => {
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.terminal&view=chat");
+    const app = createApp();
+    const destination: MachineNavigationSnapshot = {
+      machineId: "local",
+      projectId: project.id,
+      workspaceId: workspace.id,
+      tool: "core:workspace.terminal",
+      view: "core:workspace.terminal",
+      surface: {},
+    };
+    browser.navigate("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.terminal&view=browser-only%3Aworkspace.panel");
+
+    const result = await callAppMethod(app, "commitAndRestoreNavigation", destination, {
+      expected: {
+        machineId: "local",
+        projectId: project.id,
+        workspaceId: workspace.id,
+        tool: "core:workspace.terminal",
+        view: "chat",
+      },
+    });
+
+    expect(result).toBe(false);
+    expect(browser.url.searchParams.get("view")).toBe("browser-only:workspace.panel");
   });
 
   it("routes selected-panel, route, activity, and refresh-current invalidation through the generic seam", async () => {
@@ -950,7 +1091,6 @@ describe("PiWebApp plugin host", () => {
       tool: "missing",
       view: "missing",
     }, false, { contributionQuery: {} });
-
     expect(appState(app)).toMatchObject({
       workspaceTool: "core:workspace.terminal",
       mainView: "core:workspace.terminal",

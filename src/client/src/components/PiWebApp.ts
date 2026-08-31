@@ -160,6 +160,7 @@ export class PiWebApp extends LitElement {
     {
       notifications: this.notifications,
       navigateToSession: (session, options) => this.navigateToSessionFromController(session, options),
+      captureNavigation: () => navigationSelectionFromState(this.state),
       onSelectedSessionReady: ({ machineId, session }) => {
         void this.commitReadyChatAfterRender(machineId, session);
       },
@@ -189,20 +190,29 @@ export class PiWebApp extends LitElement {
     () => { this.updateUrl(); },
     this.sessions,
     new SessionStorageWorkspaceSelectionMemory(),
-    { navigateToWorkspace: (workspace, options) => this.navigateToWorkspaceFromController(workspace, options) },
+    {
+      navigateToWorkspace: (workspace, options) => this.navigateToWorkspaceFromController(workspace, options),
+      captureNavigation: () => navigationSelectionFromState(this.state),
+    },
   );
   private readonly projects = new ProjectController(
     () => this.state,
     (patch) => { this.setState(patch); },
     this.workspaces,
-    { navigateToProject: (project, options) => this.navigateToProjectFromController(project, options) },
+    {
+      navigateToProject: (project, options) => this.navigateToProjectFromController(project, options),
+      captureNavigation: () => navigationSelectionFromState(this.state),
+    },
   );
   private readonly machines = new MachineController(
     () => this.state,
     (patch) => { this.setState(patch); },
     () => { this.updateUrl(); },
     this.projects,
-    { navigateToMachine: (machine, options) => this.navigateToMachineFromController(machine, options) },
+    {
+      navigateToMachine: (machine, options) => this.navigateToMachineFromController(machine, options),
+      captureNavigation: () => navigationSelectionFromState(this.state),
+    },
   );
   private readonly piWebStatusController = new PiWebStatusController(
     () => this.state,
@@ -623,7 +633,10 @@ export class PiWebApp extends LitElement {
       });
       if (route.projectId === undefined || route.projectId === "") {
         this.workspaces.clearSelection({ updateUrl: false });
-        await this.finishWorkspaceRouteRestore(routeSurface, finishOptions);
+        await this.finishWorkspaceRouteRestore(routeSurface, {
+          ...finishOptions,
+          normalizeUnavailableRoute: true,
+        });
         return;
       }
       if (this.routeMatchesCurrentSelection(route)) {
@@ -641,7 +654,10 @@ export class PiWebApp extends LitElement {
         const error = this.state.error;
         this.workspaces.clearSelection({ updateUrl: false });
         this.setState({ selectedTerminalId: undefined, ...(error === "" ? {} : { error }) });
-        await this.finishWorkspaceRouteRestore(emptyWorkspaceRouteSurface(), finishOptions);
+        await this.finishWorkspaceRouteRestore(routeSurface, {
+          ...finishOptions,
+          normalizeUnavailableRoute: true,
+        });
         return;
       }
       await this.workspaces.selectProject(project, { workspaceId: route.workspaceId, sessionId: route.sessionId, updateUrl: false });
@@ -667,7 +683,10 @@ export class PiWebApp extends LitElement {
     const requestedPanelView = options.requestedView === "chat" ? undefined : options.requestedView;
     const requestedViewUnavailable = requestedPanelView !== undefined
       && this.availableWorkspacePanelId(requestedPanelView, panels) === undefined;
-    const normalizeUnavailableRoute = options.normalizeUnavailableRoute || requestedToolUnavailable || requestedViewUnavailable;
+    const requestedWorkspaceUnavailable = options.requestedRoute?.workspaceId !== undefined
+      && (this.state.selectedProject?.id !== options.requestedRoute.projectId
+        || this.state.selectedWorkspace?.id !== options.requestedRoute.workspaceId);
+    const normalizeUnavailableRoute = options.normalizeUnavailableRoute || requestedToolUnavailable || requestedViewUnavailable || requestedWorkspaceUnavailable;
     if (options.unavailablePanelViewRoute || requestedViewUnavailable) {
       const fallback = this.effectiveWorkspaceTool(panels);
       if (fallback !== undefined) this.setState({ mainView: fallback });
@@ -955,21 +974,27 @@ export class PiWebApp extends LitElement {
       && current.view === route.view;
   }
 
+  private navigationSnapshotMatchesUrl(snapshot: MachineNavigationSnapshot): boolean {
+    return this.navigationRouteMatchesUrl(routeFromMachineNavigationSnapshot(snapshot))
+      && this.navigationSurfaceMatchesUrl(snapshot.surface);
+  }
+
   private navigationSelectionMatchesUrl(expected: NavigationSelection): boolean {
     const current = readRoute();
     return (current.machineId ?? "local") === expected.machineId
       && current.projectId === expected.projectId
       && current.workspaceId === expected.workspaceId
-      && current.sessionId === expected.sessionId;
+      && current.sessionId === expected.sessionId
+      && current.tool === expected.tool
+      && current.view === expected.view;
   }
 
   private routeSelectionMatchesUrl(route: Pick<ParsedAppRoute, "machineId" | "projectId" | "workspaceId" | "sessionId">): boolean {
-    return this.navigationSelectionMatchesUrl({
-      machineId: route.machineId ?? "local",
-      projectId: route.projectId,
-      workspaceId: route.workspaceId,
-      sessionId: route.sessionId,
-    });
+    const current = readRoute();
+    return (current.machineId ?? "local") === (route.machineId ?? "local")
+      && current.projectId === route.projectId
+      && current.workspaceId === route.workspaceId
+      && current.sessionId === route.sessionId;
   }
 
   private routeLocationMatchesUrl(route: Pick<ParsedAppRoute, "machineId" | "projectId" | "workspaceId" | "sessionId" | "tool" | "view">): boolean {
@@ -1018,10 +1043,7 @@ export class PiWebApp extends LitElement {
       this.replaceMachineNavigationSnapshot(snapshot);
       return true;
     }
-    const restoredQuery = snapshot.projectId === this.state.selectedProject?.id && snapshot.workspaceId === this.state.selectedWorkspace?.id
-      ? snapshot.surface.contributionQuery ?? {}
-      : {};
-    this.replaceNavigationUrl(restoredQuery);
+    this.replaceNavigationUrl(this.currentContributionQueryForState());
     return true;
   }
 
@@ -1131,7 +1153,7 @@ export class PiWebApp extends LitElement {
         surface: { ...(options?.terminalId === undefined ? {} : { selectedTerminalId: options.terminalId }) },
       };
       if (!await this.commitAndRestoreNavigation(destination)) return;
-      if (navigationSeq !== this.runtimeTerminalNavigationSeq || !this.navigationRouteMatchesUrl(routeFromMachineNavigationSnapshot(destination))) return;
+      if (navigationSeq !== this.runtimeTerminalNavigationSeq || !this.navigationSnapshotMatchesUrl(destination)) return;
       if (selectedMachineId(this.state) !== machineId) {
         this.setState({ error: "Machine not found for terminal command run" });
         return;
@@ -1545,7 +1567,7 @@ export class PiWebApp extends LitElement {
         .onCloseProject=${(project: Project) => this.projects.closeProject(project.id)}
         .onSelectWorkspace=${(workspace: Workspace) => this.selectNavigationItem("workspaces", "sessions", () => this.selectWorkspaceFromNavigation(workspace))}
         .onDeleteWorkspace=${(workspace: Workspace) => { void this.deleteWorkspace(workspace); }}
-        .onArchivedCollapsed=${() => { this.sessions.clearSelectionAfterArchivedCollapse(); }}
+        .onArchivedCollapsed=${() => { void this.sessions.clearSelectionAfterArchivedCollapse(); }}
         .onStartSession=${() => this.startSessionFromNavigation()}
         .onSelectSession=${(session: SessionInfo) => this.selectNavigationItem("sessions", "chat", () => this.selectSessionFromNavigation(session))}
         .onMarkSessionRead=${(session: SessionInfo) => { this.markSessionsRead([session]); }}
@@ -2241,11 +2263,13 @@ export class PiWebApp extends LitElement {
     if (machine === undefined || machine.kind === "local") return;
     if (!window.confirm(`Remove ${machine.name}?\n\nThis only removes it from this PI WEB gateway.`)) return;
     const wasSelected = this.state.selectedMachine?.id === machine.id;
-    const expected = navigationSelectionFromState(this.state);
     if (wasSelected) this.rememberCurrentMachineNavigation();
     const fallback = await this.machines.deleteMachine(machine, { selectFallback: !wasSelected });
     if (!this.state.machines.some((candidate) => candidate.id === machine.id)) this.machineNavigation.forget(machine.id);
-    if (wasSelected && fallback !== undefined) await this.selectMachineWithMemory(fallback, { rememberCurrent: false, expected });
+    if (this.state.selectedMachine?.id === machine.id && fallback !== undefined) {
+      const expected = navigationSelectionFromState(this.state);
+      await this.selectMachineWithMemory(fallback, { rememberCurrent: false, expected });
+    }
   }
 
   private openSelectedMachine(): void {
@@ -2681,11 +2705,14 @@ function unreadChatIdentity(machineId: string, session: Pick<SessionInfo, "id" |
 }
 
 function navigationSelectionFromState(state: Pick<AppState, "selectedMachine" | "selectedProject" | "selectedWorkspace" | "selectedSession">): NavigationSelection {
+  const route = readRoute();
   return {
     machineId: selectedMachineId(state),
     projectId: state.selectedProject?.id,
     workspaceId: state.selectedWorkspace?.id,
     ...(state.selectedSession === undefined || Reflect.get(state.selectedSession, "clientPendingStart") !== true ? { sessionId: state.selectedSession?.id } : {}),
+    ...(route.tool === undefined ? {} : { tool: route.tool }),
+    ...(route.view === undefined ? {} : { view: route.view }),
   };
 }
 

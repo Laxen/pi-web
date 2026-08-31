@@ -170,6 +170,37 @@ describe("MachineController", () => {
     expect(projects.loadProjects).not.toHaveBeenCalled();
   });
 
+  it("follows a deletion when the user selects the removed machine while the request is pending", async () => {
+    let state: AppState = { ...initialAppState(), machines: [localMachine, remoteMachine], selectedMachine: localMachine };
+    const setState = (patch: Partial<AppState>) => { state = { ...state, ...patch }; };
+    let resolveDelete: (() => void) | undefined;
+    const deleteRequest = new Promise<{ deleted: true }>((resolve) => { resolveDelete = () => { resolve({ deleted: true }); }; });
+    const navigationExpected: { machineId: string | undefined; selectedMachineId: string | undefined }[] = [];
+    const controller = new MachineController(
+      () => state,
+      setState,
+      vi.fn(),
+      { loadProjects: vi.fn() },
+      {
+        navigateToMachine: (machine, options) => {
+          navigationExpected.push({ machineId: options?.expected?.machineId, selectedMachineId: state.selectedMachine?.id });
+          state = { ...state, selectedMachine: machine };
+          return Promise.resolve(true);
+        },
+      },
+    );
+    vi.spyOn(api, "deleteMachine").mockReturnValue(deleteRequest);
+
+    const deletion = controller.deleteMachine(remoteMachine);
+    state = { ...state, selectedMachine: remoteMachine };
+    resolveDelete?.();
+    await deletion;
+
+    expect(navigationExpected).toEqual([{ machineId: remoteMachine.id, selectedMachineId: remoteMachine.id }]);
+    expect(state.selectedMachine).toEqual(localMachine);
+    expect(state.machines).toEqual([localMachine]);
+  });
+
   it("preserves the current machine state when adding a machine fails", async () => {
     let state: AppState = { ...initialAppState(), machines: [localMachine], selectedMachine: localMachine };
     const setState = (patch: Partial<AppState>) => { state = { ...state, ...patch }; };
