@@ -9,6 +9,19 @@ export type GetState = () => AppState;
 export type SetState = (patch: Partial<AppState>) => void;
 export type UpdateUrl = (options?: { replace?: boolean | undefined }) => void;
 
+/** Navigation identity captured before an async operation begins. */
+export interface NavigationSelection {
+  machineId: string;
+  projectId?: string | undefined;
+  workspaceId?: string | undefined;
+  sessionId?: string | undefined;
+}
+
+export interface NavigationDestinationOptions {
+  replace?: boolean | undefined;
+  expected?: NavigationSelection | undefined;
+}
+
 export interface RouteTarget {
   workspaceId?: string | undefined;
   sessionId?: string | undefined;

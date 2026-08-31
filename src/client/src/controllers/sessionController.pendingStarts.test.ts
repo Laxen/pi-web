@@ -46,6 +46,41 @@ describe("SessionController pending starts", () => {
     expect(statusCalls).toEqual(["started-session"]);
   });
 
+  it("publishes the stable session id before replacing a pending rendered selection", async () => {
+    const started: SessionInfo = { ...oldSession, id: "started-session", path: "/tmp/started-session.jsonl" };
+    const startRequest = deferred<SessionInfo>();
+    let state: AppState = { ...initialAppState(), selectedWorkspace: workspace, sessions: [] };
+    let selectedAtNavigation: string | undefined;
+    const controller = new SessionController(
+      () => state,
+      (patch) => { state = { ...state, ...patch }; },
+      () => undefined,
+      undefined,
+      {
+        api: {
+          ...defaultApi,
+          startSession: () => startRequest.promise,
+        },
+        socket: new FakeSocket(),
+        navigateToSession: (session) => {
+          selectedAtNavigation = state.selectedSession?.id;
+          state = { ...state, selectedSession: session };
+          return Promise.resolve(true);
+        },
+      },
+    );
+
+    const start = controller.startSession({ updateUrl: false });
+    const temporaryId = state.selectedSession?.id;
+    expect(temporaryId).toMatch(/^pending-session-/);
+
+    startRequest.resolve(started);
+    await start;
+
+    expect(selectedAtNavigation).toBe(temporaryId);
+    expect(state.selectedSession?.id).toBe(started.id);
+  });
+
   it("does not duplicate a started session when its session.created broadcast races the HTTP response", async () => {
     const storage = new MemoryStorage();
     Object.defineProperty(globalThis, "localStorage", { value: storage, configurable: true });

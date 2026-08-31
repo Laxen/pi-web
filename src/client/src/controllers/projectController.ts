@@ -1,5 +1,5 @@
 import { api as defaultApi, type Project } from "../api";
-import { selectedMachineId, type GetState, type SetState } from "./types";
+import { selectedMachineId, type GetState, type NavigationDestinationOptions, type NavigationSelection, type SetState } from "./types";
 import type { WorkspaceController } from "./workspaceController";
 
 /**
@@ -14,10 +14,12 @@ export interface ProjectTrustChoice {
 
 export interface ProjectControllerDependencies {
   api?: Pick<typeof defaultApi, "projects" | "addProject" | "closeProject" | "setWorkspaceTrust">;
+  navigateToProject?: (project: Project | undefined, options?: NavigationDestinationOptions) => Promise<boolean>;
 }
 
 export class ProjectController {
   private readonly api: Pick<typeof defaultApi, "projects" | "addProject" | "closeProject" | "setWorkspaceTrust">;
+  private readonly navigateToProject: ProjectControllerDependencies["navigateToProject"];
 
   constructor(
     private readonly getState: GetState,
@@ -26,6 +28,7 @@ export class ProjectController {
     deps: ProjectControllerDependencies = {},
   ) {
     this.api = deps.api ?? defaultApi;
+    this.navigateToProject = deps.navigateToProject;
   }
 
   async loadProjects() {
@@ -47,12 +50,14 @@ export class ProjectController {
   async addProject(path: string, create?: boolean, trustChoice?: ProjectTrustChoice) {
     if (path.trim() === "") return;
     const machineId = selectedMachineId(this.getState());
+    const expected = navigationSelection(this.getState());
     try {
       const project = await this.api.addProject(path.trim(), undefined, create, machineId);
       if (selectedMachineId(this.getState()) !== machineId) return;
       const projects = this.getState().projects;
       this.setState({ projects: [...projects.filter((p) => p.id !== project.id), project], projectDialogOpen: false });
-      await this.workspaces.selectProject(project);
+      if (this.navigateToProject !== undefined) await this.navigateToProject(project, { expected });
+      else await this.workspaces.selectProject(project);
       if (trustChoice?.changed === true) {
         await this.applyTrustChoice(project, trustChoice.trusted, machineId);
       }
@@ -75,15 +80,28 @@ export class ProjectController {
 
   async closeProject(projectId: string) {
     const machineId = selectedMachineId(this.getState());
+    const expected = navigationSelection(this.getState());
     try {
       await this.api.closeProject(projectId, machineId);
       if (selectedMachineId(this.getState()) !== machineId) return;
       this.workspaces.forgetProject(projectId);
       const state = this.getState();
+      const wasSelected = state.selectedProject?.id === projectId;
       this.setState({ projects: state.projects.filter((p) => p.id !== projectId) });
-      if (state.selectedProject?.id === projectId) this.workspaces.clearSelection();
+      if (!wasSelected) return;
+      if (this.navigateToProject !== undefined) await this.navigateToProject(undefined, { expected });
+      else this.workspaces.clearSelection();
     } catch (error) {
       if (selectedMachineId(this.getState()) === machineId) this.setState({ error: String(error) });
     }
   }
+}
+
+function navigationSelection(state: ReturnType<GetState>): NavigationSelection {
+  return {
+    machineId: selectedMachineId(state),
+    projectId: state.selectedProject?.id,
+    workspaceId: state.selectedWorkspace?.id,
+    sessionId: state.selectedSession?.id,
+  };
 }

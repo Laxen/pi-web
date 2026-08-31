@@ -143,6 +143,17 @@ describe("machineNavigationSnapshotFromState", () => {
       selectedTerminalId: undefined,
     });
   });
+
+  it("does not publish a temporary pending-start session id", () => {
+    const pending = Object.assign(session("pending"), { clientPendingStart: true });
+    const state: AppState = {
+      ...initialAppState(),
+      selectedWorkspace: workspace("workspace", "project"),
+      selectedSession: pending,
+    };
+
+    expect(machineNavigationSnapshotFromState(state).sessionId).toBeUndefined();
+  });
 });
 
 describe("routeFromMachineNavigationSnapshot", () => {

@@ -2,7 +2,7 @@ import { api as defaultApi, type Project, type Workspace } from "../api";
 import { resetWorkspaceScopedState, type AppState } from "../appState";
 import { mergeCachedNewSessions } from "../cachedNewSessions";
 import { machineProjectKey } from "../machineKeys";
-import { selectedMachineId, type GetState, type RouteTarget, type SetState, type UpdateUrl } from "./types";
+import { selectedMachineId, type GetState, type NavigationDestinationOptions, type NavigationSelection, type RouteTarget, type SetState, type UpdateUrl } from "./types";
 import type { SessionController } from "./sessionController";
 import { TrailingRefreshCoordinator } from "./trailingRefreshCoordinator";
 import { InMemoryWorkspaceSelectionMemory, selectPreferredWorkspace, type WorkspaceSelectionMemory } from "./workspaceSelection";
@@ -11,12 +11,14 @@ const WORKSPACE_TOPOLOGY_REFRESH_DEBOUNCE_MS = 50;
 
 export interface WorkspaceControllerDependencies {
   api?: Pick<typeof defaultApi, "sessions" | "workspaces">;
+  navigateToWorkspace?: (workspace: Workspace | undefined, options?: NavigationDestinationOptions) => Promise<boolean>;
   onBackgroundError?: (message: string, error: unknown) => void;
   topologyRefreshDebounceMs?: number;
 }
 
 export class WorkspaceController {
   private readonly api: Pick<typeof defaultApi, "sessions" | "workspaces">;
+  private readonly navigateToWorkspace: WorkspaceControllerDependencies["navigateToWorkspace"];
   private readonly onBackgroundError: (message: string, error: unknown) => void;
   private readonly topologyRefreshes: TrailingRefreshCoordinator<string>;
 
@@ -29,6 +31,7 @@ export class WorkspaceController {
     deps: WorkspaceControllerDependencies = {},
   ) {
     this.api = deps.api ?? defaultApi;
+    this.navigateToWorkspace = deps.navigateToWorkspace;
     this.onBackgroundError = deps.onBackgroundError ?? ((message, error) => { console.warn(message, error); });
     this.topologyRefreshes = new TrailingRefreshCoordinator(
       deps.topologyRefreshDebounceMs ?? WORKSPACE_TOPOLOGY_REFRESH_DEBOUNCE_MS,
@@ -124,12 +127,15 @@ export class WorkspaceController {
   }
 
   async refreshAfterWorkspaceDeleted(projectId: string, workspaceId: string): Promise<void> {
+    const expected = navigationSelection(this.getState());
     const workspaces = await this.refreshProjectWorkspaces(projectId);
     const state = this.getState();
-    if (state.selectedProject?.id !== projectId || state.selectedWorkspace?.id !== workspaceId) return;
+    if (selectedMachineId(state) !== expected.machineId || state.selectedProject?.id !== projectId || state.selectedWorkspace?.id !== workspaceId) return;
 
     const fallback = selectFallbackWorkspace(workspaces);
-    if (fallback !== undefined) await this.selectWorkspace(fallback);
+    if (this.navigateToWorkspace !== undefined) {
+      await this.navigateToWorkspace(fallback, { expected });
+    } else if (fallback !== undefined) await this.selectWorkspace(fallback);
     else this.clearSelection();
   }
 
@@ -157,6 +163,15 @@ export class WorkspaceController {
     if (refreshed === undefined || sameWorkspaceSnapshot(selected, refreshed)) return undefined;
     return { selectedWorkspace: refreshed };
   }
+}
+
+function navigationSelection(state: ReturnType<GetState>): NavigationSelection {
+  return {
+    machineId: selectedMachineId(state),
+    projectId: state.selectedProject?.id,
+    workspaceId: state.selectedWorkspace?.id,
+    sessionId: state.selectedSession?.id,
+  };
 }
 
 function selectFallbackWorkspace(workspaces: Workspace[]): Workspace | undefined {

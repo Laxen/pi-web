@@ -3,7 +3,7 @@ import type { AppState } from "../appState";
 import { initialAppState } from "../appState";
 import type { Machine, Project, SessionInfo, Workspace } from "../api";
 import type { SessionController } from "./sessionController";
-import { WorkspaceController } from "./workspaceController";
+import { WorkspaceController, type WorkspaceControllerDependencies } from "./workspaceController";
 
 function machine(id: string): Machine {
   return { id, name: id, kind: id === "local" ? "local" : "remote", createdAt: "now", updatedAt: "now" };
@@ -48,7 +48,7 @@ interface Harness {
 function harness(
   initial: Partial<AppState>,
   loadWorkspaces: LoadWorkspaces,
-  options: { topologyRefreshDebounceMs?: number } = {},
+  options: { topologyRefreshDebounceMs?: number; navigateToWorkspace?: WorkspaceControllerDependencies["navigateToWorkspace"] } = {},
 ): Harness {
   let state: AppState = { ...initialAppState(), ...initial };
   const setState = (patch: Partial<AppState>) => { state = { ...state, ...patch }; };
@@ -68,6 +68,7 @@ function harness(
     undefined,
     {
       api: { workspaces: loadWorkspaces, sessions: vi.fn<(path: string, machineId?: string) => Promise<SessionInfo[]>>().mockResolvedValue([]) },
+      ...(options.navigateToWorkspace === undefined ? {} : { navigateToWorkspace: options.navigateToWorkspace }),
       onBackgroundError: (message, error) => { backgroundErrors.push({ message, error }); },
       topologyRefreshDebounceMs: options.topologyRefreshDebounceMs ?? 0,
     },
@@ -489,6 +490,41 @@ describe("WorkspaceController.refreshSelectedProjectTopology", () => {
 
     // The last response wins, so the newly created worktree stays visible.
     expect(test.state().workspaces).toEqual([main, created]);
+  });
+
+  it("publishes the fallback workspace before route reconciliation selects it", async () => {
+    const repo = project("p1", "/repo");
+    const main = workspace(repo.id, repo.path, { isMain: true });
+    const removed = workspace(repo.id, "/repo-gone");
+    let selectedAtNavigation: string | undefined;
+    let navigatedWorkspace: string | undefined;
+    const test = harness(
+      {
+        selectedMachine: machine("local"),
+        projects: [repo],
+        selectedProject: repo,
+        selectedWorkspace: removed,
+        workspaces: [main, removed],
+        workspacesByProjectId: { [repo.id]: [main, removed] },
+        selectedSession: session(removed.path),
+      },
+      vi.fn().mockResolvedValue([main]),
+      {
+        navigateToWorkspace: (next) => {
+          selectedAtNavigation = test.state().selectedWorkspace?.id;
+          navigatedWorkspace = next?.id;
+          test.setState({ selectedWorkspace: next, selectedSession: undefined });
+          return Promise.resolve(true);
+        },
+      },
+    );
+
+    await test.controller.refreshAfterWorkspaceDeleted(repo.id, removed.id);
+
+    expect(selectedAtNavigation).toBe(removed.id);
+    expect(navigatedWorkspace).toBe(main.id);
+    expect(test.state().selectedWorkspace?.id).toBe(main.id);
+    expect(test.updateUrl).not.toHaveBeenCalled();
   });
 
   it("does not request anything when no project is selected", async () => {

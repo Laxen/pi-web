@@ -74,6 +74,38 @@ describe("ProjectController", () => {
     expect(selectProject).toHaveBeenCalledOnce();
   });
 
+  it("publishes the created project before route reconciliation selects it", async () => {
+    const addedProject = project("added", "/added");
+    let state: AppState = { ...initialAppState(), projectDialogOpen: true };
+    let selectedAtNavigation: string | undefined;
+    let navigatedProject: string | undefined;
+    const controller = new ProjectController(
+      () => state,
+      (patch) => { state = { ...state, ...patch }; },
+      { selectProject: vi.fn(), forgetProject: vi.fn(), clearSelection: vi.fn() },
+      {
+        api: {
+          projects: vi.fn(),
+          addProject: vi.fn().mockResolvedValue(addedProject),
+          closeProject: vi.fn(),
+          setWorkspaceTrust: vi.fn(),
+        },
+        navigateToProject: (next) => {
+          selectedAtNavigation = state.selectedProject?.id;
+          navigatedProject = next?.id;
+          state = { ...state, selectedProject: next };
+          return Promise.resolve(true);
+        },
+      },
+    );
+
+    await controller.addProject("/added");
+
+    expect(selectedAtNavigation).toBeUndefined();
+    expect(navigatedProject).toBe(addedProject.id);
+    expect(state.selectedProject?.id).toBe(addedProject.id);
+  });
+
   it("pins a touched trust choice on the project's main workspace after adding it", async () => {
     const addedProject = project("added", "/added");
     const addedWorkspace = workspace(addedProject.id, addedProject.path);

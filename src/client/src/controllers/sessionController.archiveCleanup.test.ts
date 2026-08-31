@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { SessionInfo } from "../api";
 import { initialAppState } from "../appState";
 import { SessionController } from "./sessionController";
 import { InMemorySessionSelectionMemory } from "./sessionSelection";
@@ -32,6 +33,39 @@ describe("SessionController archive and cleanup", () => {
     expect(typeof state.sessions[0]?.archivedAt).toBe("string");
     expect(controller.preferredSession(workspace.path, state.sessions, undefined)).toBeUndefined();
     expect(urlUpdates).toEqual([undefined]);
+  });
+
+  it("publishes an archive fallback before route reconciliation selects it", async () => {
+    const persistedSession = { ...oldSession, persisted: true };
+    const nextSession = { ...oldSession, id: "next-session", path: "/tmp/next-session.jsonl", persisted: true };
+    let state: AppState = { ...initialAppState(), selectedWorkspace: workspace, selectedSession: persistedSession, sessions: [persistedSession, nextSession] };
+    let selectedAtNavigation: string | undefined;
+    let navigatedSession: string | undefined;
+    const navigateToSession = (session: SessionInfo | undefined): Promise<boolean> => {
+      selectedAtNavigation = state.selectedSession?.id;
+      navigatedSession = session?.id;
+      state = { ...state, selectedSession: session };
+      return Promise.resolve(true);
+    };
+    const api: typeof defaultApi = {
+      ...defaultApi,
+      archive: () => Promise.resolve({ archived: true }),
+      messages: () => Promise.resolve(emptyPage),
+      status: (session) => Promise.resolve(status(sessionLookupId(session))),
+    };
+    const controller = new SessionController(
+      () => state,
+      (patch) => { state = { ...state, ...patch }; },
+      () => undefined,
+      new InMemorySessionSelectionMemory(),
+      { api, socket: new FakeSocket(), navigateToSession },
+    );
+
+    await controller.archiveSession();
+
+    expect(selectedAtNavigation).toBe(persistedSession.id);
+    expect(navigatedSession).toBe(nextSession.id);
+    expect(state.selectedSession?.id).toBe(nextSession.id);
   });
 
   it("archives selected session descendants and selects the next active session", async () => {
