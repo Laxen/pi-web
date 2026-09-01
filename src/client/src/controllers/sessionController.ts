@@ -20,6 +20,7 @@ import { TrailingRefreshCoordinator } from "./trailingRefreshCoordinator";
 
 const MESSAGE_PAGE_SIZE = 100;
 const PENDING_SESSION_START_SCOPE = ["machine", "project", "workspace", "session"] as const;
+const SESSION_RESTORE_SCOPE = ["machine", "project", "workspace", "session"] as const;
 
 export interface SessionEventSocket {
   connect(
@@ -847,22 +848,30 @@ export class SessionController {
 
   async restoreSession(session = this.getState().selectedSession) {
     if (!session) return;
-    const expected = this.navigationSelection();
+    const machineId = selectedMachineId(this.getState());
+    const selectionSeq = this.selectionSeq;
+    const navigation = this.beginNavigationOperation?.(SESSION_RESTORE_SCOPE);
     try {
-      await this.api.restore(session, selectedMachineId(this.getState()));
-      const restored = { ...session };
-      delete restored.archived;
-      delete restored.archivedAt;
-      const wasSelected = this.getState().selectedSession?.id === restored.id;
-      if (this.navigateToSession !== undefined && wasSelected) {
-        this.replaceSessionInList(restored);
-        await this.navigateToSession(restored, { expected });
-      } else {
-        this.replaceSession(restored);
-        if (wasSelected) await this.selectSession(restored);
-      }
+      await this.api.restore(session, machineId);
     } catch (error) {
-      this.setState({ error: String(error) });
+      if (this.isCurrentRestoreOperation(machineId, selectionSeq, navigation)) this.setState({ error: String(error) });
+      return;
+    }
+
+    // Restore changes session metadata, not the route surface. A view/tool
+    // change must therefore not strand the selected session merely because a
+    // route-navigation callback would reject its older surface expectation.
+    if (!this.isCurrentRestoreOperation(machineId, selectionSeq, navigation)) return;
+    const restored = { ...session };
+    delete restored.archived;
+    delete restored.archivedAt;
+    const wasSelected = this.getState().selectedSession?.id === restored.id;
+    this.replaceSession(restored);
+    if (wasSelected) {
+      await this.selectSession(restored, {
+        updateUrl: false,
+        ...(navigation === undefined ? {} : { navigation }),
+      });
     }
   }
 
@@ -1228,6 +1237,12 @@ export class SessionController {
 
   private isCurrentSessionSelection(sessionId: string, machineId: string, selectionSeq: number): boolean {
     return selectionSeq === this.selectionSeq && this.isSelectedSessionIdentity(sessionId, machineId);
+  }
+
+  private isCurrentRestoreOperation(machineId: string, selectionSeq: number, navigation?: NavigationFreshness): boolean {
+    return selectionSeq === this.selectionSeq
+      && selectedMachineId(this.getState()) === machineId
+      && navigationIsCurrent(navigation);
   }
 
   private isSelectedSessionIdentity(sessionId: string, machineId: string): boolean {
