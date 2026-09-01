@@ -269,7 +269,6 @@ export class PiWebApp extends LitElement {
     view: 0,
   };
   private routeRestoreDepth = 0;
-  private restoringRouteTerminalId: string | undefined;
   private pendingRemoteRouteRestore: ParsedAppRoute | undefined;
   private remoteRouteRestoreTimer: number | undefined;
   private remoteRouteRestoreAttempt = 0;
@@ -471,6 +470,13 @@ export class PiWebApp extends LitElement {
     const initialRouteMachineHealth = this.state.machineStatuses[effectiveRoute.machineId ?? "local"];
     if (effectiveRoute !== route) this.replaceRouteAndClearWorkspaceQuery(effectiveRoute);
     await this.projects.loadProjects();
+    // Project loading can outlive the initial URL capture; only hand the fixed
+    // route to reconciliation while it is still the current destination.
+    if (!this.routeLocationMatchesUrl(effectiveRoute)) {
+      await this.withChatScrollTransition(async () => { await this.restoreRoute(false); });
+      await this.refreshWorkspaceDeletionRuns();
+      return;
+    }
     await this.withChatScrollTransition(() => this.restoreRouteFor(effectiveRoute, false));
     if (this.shouldDeferRemoteRouteRestore(effectiveRoute, initialRouteMachineHealth)) this.deferRemoteRouteRestore(effectiveRoute);
     else {
@@ -635,7 +641,6 @@ export class PiWebApp extends LitElement {
     const navigation = this.beginNavigationOperation(ROUTE_RESTORE_SCOPE);
     const restoreSeq = ++this.routeRestoreSeq;
     this.routeRestoreDepth += 1;
-    this.restoringRouteTerminalId = routeSurface.selectedTerminalId;
     try {
       const machineResolved = await this.restoreRouteMachine(parsedRoute, false);
       if (!machineResolved) {
@@ -665,7 +670,7 @@ export class PiWebApp extends LitElement {
       this.setState({
         workspaceTool: route.tool ?? this.state.workspaceTool,
         mainView: this.resolveRestoredMainView(restoredMainView) ?? route.view ?? this.defaultRouteView(),
-        selectedTerminalId: routeSurface.selectedTerminalId,
+        selectedTerminalId: this.currentRouteTerminalId(),
       });
       if (route.projectId === undefined || route.projectId === "") {
         this.workspaces.clearSelection({ updateUrl: false });
@@ -676,7 +681,8 @@ export class PiWebApp extends LitElement {
         return;
       }
       if (this.routeMatchesCurrentSelection(route)) {
-        if (routeSurface.selectedTerminalId !== undefined) this.rememberSelectedTerminal(routeSurface.selectedTerminalId);
+        const selectedTerminalId = this.currentRouteTerminalId();
+        if (selectedTerminalId !== undefined) this.rememberSelectedTerminal(selectedTerminalId);
         await this.finishWorkspaceRouteRestore(routeSurface, finishOptions);
         return;
       }
@@ -698,12 +704,12 @@ export class PiWebApp extends LitElement {
       }
       await this.workspaces.selectProject(project, { workspaceId: route.workspaceId, sessionId: route.sessionId, updateUrl: false, navigation });
       if (!this.isCurrentRouteRestore(restoreSeq, navigation)) return;
-      this.setState({ selectedTerminalId: routeSurface.selectedTerminalId });
-      if (routeSurface.selectedTerminalId !== undefined) this.rememberSelectedTerminal(routeSurface.selectedTerminalId);
+      const selectedTerminalId = this.currentRouteTerminalId();
+      this.setState({ selectedTerminalId });
+      if (selectedTerminalId !== undefined) this.rememberSelectedTerminal(selectedTerminalId);
       await this.finishWorkspaceRouteRestore(routeSurface, finishOptions);
     } finally {
       this.routeRestoreDepth = Math.max(0, this.routeRestoreDepth - 1);
-      if (this.routeRestoreDepth === 0) this.restoringRouteTerminalId = undefined;
       if (selectedMachineId(this.state) !== machineBeforeRestore) this.schedulePiWebStatusRefresh();
     }
   }
@@ -817,6 +823,15 @@ export class PiWebApp extends LitElement {
       contributionQuery: readContributionQueryRecord(),
       selectedTerminalId: readNamespacedString(TERMINAL_ROUTE_NAMESPACE, "terminal"),
     };
+  }
+
+  /**
+   * Terminal query changes are an independent surface update. Read the value
+   * at each state-mutation boundary so a route restore cannot reapply a stale
+   * captured terminal after a newer terminal selection is published.
+   */
+  private currentRouteTerminalId(): string | undefined {
+    return readNamespacedString(TERMINAL_ROUTE_NAMESPACE, "terminal");
   }
 
   private routeForSelectedMachine(route: ParsedAppRoute): ParsedAppRoute {
@@ -1326,7 +1341,7 @@ export class PiWebApp extends LitElement {
     if (previous.selectedWorkspace?.id === next.selectedWorkspace?.id) return;
     this.terminalAutoStartWorkspaceId = undefined;
     this.activeTerminalIds.clear();
-    const selectedTerminalId = this.routeRestoreInProgress ? this.restoringRouteTerminalId : next.selectedWorkspace === undefined ? undefined : this.terminalSelection.latestTerminalId(this.terminalWorkspaceKey(next.selectedWorkspace));
+    const selectedTerminalId = this.routeRestoreInProgress ? this.currentRouteTerminalId() : next.selectedWorkspace === undefined ? undefined : this.terminalSelection.latestTerminalId(this.terminalWorkspaceKey(next.selectedWorkspace));
     this.setState({ activeTerminalCount: 0, selectedTerminalId });
     const gatewayPluginsLoading = this.gatewayPluginLoadPromise !== undefined && !this.gatewayPluginLoadAttemptComplete;
     if ((!this.routeRestoreInProgress || next.selectedWorkspace !== undefined) && !gatewayPluginsLoading) this.reconcileWorkspacePanelSelection();
