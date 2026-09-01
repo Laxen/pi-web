@@ -165,6 +165,7 @@ export class PiWebApp extends LitElement {
       notifications: this.notifications,
       navigateToSession: (session, options) => this.navigateToSessionFromController(session, options),
       captureNavigation: () => navigationSelectionFromState(this.state),
+      beginNavigationOperation: (scope) => this.beginNavigationOperation(scope),
       onSelectedSessionReady: ({ machineId, session }) => {
         void this.commitReadyChatAfterRender(machineId, session);
       },

@@ -301,6 +301,44 @@ describe("PiWebApp plugin host", () => {
     expect(focusNavigationTarget).not.toHaveBeenCalled();
   });
 
+  it("recovers a pending start after focus and a later view change", async () => {
+    const previousSession: SessionInfo = { id: "session-old", cwd: workspace.path, path: "/repo/.sessions/session-old", created: "now", modified: "now", messageCount: 0, firstMessage: "" };
+    const started: SessionInfo = { id: "session-started", cwd: workspace.path, path: "/repo/.sessions/session-started", created: "now", modified: "now", messageCount: 0, firstMessage: "" };
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&session=session-old&tool=core%3Aworkspace.terminal&view=core%3Aworkspace.terminal");
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(),
+      projects: [project],
+      selectedProject: project,
+      workspaces: [workspace],
+      selectedWorkspace: workspace,
+      sessions: [previousSession],
+      selectedSession: previousSession,
+      workspaceTool: "core:workspace.terminal",
+      mainView: "core:workspace.terminal",
+    });
+    if (!Reflect.set(app, "focusChatComposer", () => { callAppMethod(app, "selectMainView", "chat", { invalidateNavigationSelection: false }); })) throw new Error("Could not stub chat focus");
+    if (!Reflect.set(app, "restoreRouteFor", (route: { sessionId?: string }) => {
+      if (route.sessionId === started.id) setAppState(app, { ...appState(app), selectedSession: started });
+      return Promise.resolve();
+    })) throw new Error("Could not stub pending-session route recovery");
+    const startRequest = deferred<SessionInfo>();
+    const sessions: unknown = Reflect.get(app, "sessions");
+    if (!(sessions instanceof SessionController)) throw new Error("PiWebApp session controller was unavailable");
+    if (!Reflect.set(sessions, "api", { startSession: () => startRequest.promise })) throw new Error("Could not stub session start API");
+
+    await callAsyncAppMethod(app, "startSessionAndOpenChat");
+    expect(browser.url.searchParams.get("view")).toBe("chat");
+    callAppMethod(app, "selectMainView", "core:workspace.terminal");
+    startRequest.resolve(started);
+    await vi.waitFor(() => { expect(appState(app).sessions[0]?.id).toBe(started.id); });
+
+    expect(appState(app).sessions.map((session) => session.id)).toEqual([started.id, previousSession.id]);
+    expect(appState(app).selectedSession).toBeUndefined();
+    expect(browser.url.searchParams.has("session")).toBe(false);
+    expect(browser.url.searchParams.get("view")).toBe("core:workspace.terminal");
+  });
+
   it("does not focus a selection after a newer main-view navigation", async () => {
     const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&view=core%3Aworkspace.terminal");
     const app = new PiWebApp();
@@ -1780,6 +1818,13 @@ function testWorkspaceFiles(overrides: Partial<WorkspaceFilesCapabilityV1> = {})
 
 function emptyPlugin(name: string): PiWebPlugin {
   return { apiVersion: 2, name, activate: () => ({ contributions: {} }) };
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolveDeferred: ((value: T) => void) | undefined;
+  const promise = new Promise<T>((resolve) => { resolveDeferred = resolve; });
+  if (resolveDeferred === undefined) throw new Error("Deferred promise was not initialized");
+  return { promise, resolve: resolveDeferred };
 }
 
 function beginNavigationOperation(app: PiWebApp, scope: readonly NavigationScope[]): NavigationFreshness {

@@ -15,10 +15,11 @@ import { isArchivableSessionInfo, isTransientNewSessionInfo } from "../sessionPe
 import { isSessionActive } from "../../../shared/activity";
 import type { PromptAttachmentDelivery, SessionNotificationInboxEvent, SessionStartupProgressEvent } from "../../../shared/apiTypes";
 import { InMemorySessionSelectionMemory, markSessionArchived, markSessionsArchived, selectPreferredSession, selectionAfterArchivingSession, selectionAfterArchivingSessions, shouldDeselectAfterArchivedCollapse, type SessionSelectionMemory } from "./sessionSelection";
-import { selectedMachineId, type GetState, type NavigationDestinationOptions, type NavigationFreshness, type NavigationSelection, type SetState, type UpdateUrl } from "./types";
+import { selectedMachineId, type GetState, type NavigationDestinationOptions, type NavigationFreshness, type NavigationScope, type NavigationSelection, type SetState, type UpdateUrl } from "./types";
 import { TrailingRefreshCoordinator } from "./trailingRefreshCoordinator";
 
 const MESSAGE_PAGE_SIZE = 100;
+const PENDING_SESSION_START_SCOPE = ["machine", "project", "workspace", "session"] as const;
 
 export interface SessionEventSocket {
   connect(
@@ -53,6 +54,7 @@ export interface SelectedSessionReady {
 export interface SessionControllerDependencies {
   api?: typeof defaultApi;
   captureNavigation?: () => NavigationSelection;
+  beginNavigationOperation?: (scope: readonly NavigationScope[]) => NavigationFreshness;
   socket?: SessionEventSocket;
   transcripts?: ChatTranscriptStore;
   notifications?: SessionNotificationSessionBridge;
@@ -83,6 +85,7 @@ interface PendingSessionStart {
   cwd: string;
   machineId: string;
   expectedNavigation: NavigationSelection;
+  navigation?: NavigationFreshness | undefined;
   pendingUrlPublished: boolean;
   session: ClientPendingStartSessionInfo;
   queuedSends: QueuedPendingSessionSend[];
@@ -125,6 +128,7 @@ export class SessionController {
   private readonly onSelectedSessionReady: SessionControllerDependencies["onSelectedSessionReady"];
   private readonly onModelScopeChanged: SessionControllerDependencies["onModelScopeChanged"];
   private readonly captureNavigation: SessionControllerDependencies["captureNavigation"];
+  private readonly beginNavigationOperation: SessionControllerDependencies["beginNavigationOperation"];
   private selectionSeq = 0;
   private disposed = false;
   // Join-time stream watermark for the selected session. `seq` is the
@@ -166,6 +170,7 @@ export class SessionController {
     this.onSelectedSessionReady = deps.onSelectedSessionReady;
     this.onModelScopeChanged = deps.onModelScopeChanged;
     this.captureNavigation = deps.captureNavigation;
+    this.beginNavigationOperation = deps.beginNavigationOperation;
   }
 
   applyGlobalEvent(event: GlobalSessionEvent): void {
@@ -245,6 +250,11 @@ export class SessionController {
     // omitted from the URL. The stable handshake must therefore expect the
     // post-publication route, not the route captured before the row existed.
     if (pendingUrlPublished) pending.expectedNavigation = this.navigationSelection();
+    // Start the freshness window after the pending-row URL publication. The
+    // publication is part of this operation's setup; a later change to the
+    // machine/project/workspace/session route retires the completion, while a
+    // view or tool change remains an independent surface update.
+    pending.navigation = this.beginNavigationOperation?.(PENDING_SESSION_START_SCOPE);
     try {
       const session = await this.api.startSession(workspace.path, machineId, pending.tempId);
       await this.resolvePendingSessionStart(pending.tempId, session);
@@ -1386,19 +1396,80 @@ export class SessionController {
       error: "",
     });
     this.applyReleasedCreatedSessions(releasedCreatedSessions, pending.machineId);
-    if (wasSelected) {
-      if (this.navigateToSession !== undefined) {
-        await this.navigateToSession(cachedSession, {
+    if (wasSelected) await this.reconcileCompletedPendingSelection(pending, cachedSession);
+    await this.flushQueuedPendingSends(cachedSession, pending.machineId, queuedSends);
+  }
+
+  /**
+   * Complete the UI half of a create only while its selection route is still
+   * current. The backend result, list replacement, cache moves, and queued
+   * sends have already been settled above and must not depend on this guard.
+   * A stale completion must not leave the removed temporary row selected.
+   */
+  private async reconcileCompletedPendingSelection(pending: PendingSessionStart, session: SessionInfo): Promise<void> {
+    const navigation = pending.navigation;
+    if (!navigationIsCurrent(navigation)) {
+      this.clearUnreconciledPendingSelection(pending, session);
+      return;
+    }
+
+    pending.expectedNavigation = this.pendingStartExpectedNavigation(pending);
+    if (this.navigateToSession !== undefined) {
+      try {
+        const accepted = await this.navigateToSession(session, {
           ...(pending.pendingUrlPublished ? { replace: true } : {}),
           expected: pending.expectedNavigation,
         });
-      } else {
-        await this.selectSession(cachedSession, { updateUrl: false });
-        if (pending.pendingUrlPublished) this.updateUrl({ replace: true });
-        else this.updateUrl();
+        // A successful navigator intentionally changes the session URL, so its
+        // selection-scope token becomes stale as a consequence of the write it
+        // just authorized. Trust the navigator's guarded boolean and only
+        // recover if it left this pending row selected.
+        if (accepted && this.getState().selectedSession?.id !== pending.tempId) return;
+        this.clearUnreconciledPendingSelection(
+          pending,
+          session,
+          accepted || !navigationIsCurrent(navigation)
+            ? undefined
+            : "Session started, but its navigation changed before selection completed. Select it from the session list.",
+        );
+      } catch (error) {
+        this.clearUnreconciledPendingSelection(pending, session, `Session started, but it could not be selected: ${errorMessage(error)}`);
       }
+      return;
     }
-    await this.flushQueuedPendingSends(cachedSession, pending.machineId, queuedSends);
+
+    try {
+      await this.selectSession(session, { updateUrl: false, navigation });
+      if (!navigationIsCurrent(navigation)) {
+        this.clearUnreconciledPendingSelection(pending, session);
+        return;
+      }
+      if (this.getState().selectedSession?.id !== session.id) {
+        this.clearUnreconciledPendingSelection(pending, session, "Session started, but its selection changed before navigation completed. Select it from the session list.");
+        return;
+      }
+      if (pending.pendingUrlPublished) this.updateUrl({ replace: true });
+      else this.updateUrl();
+    } catch (error) {
+      this.clearUnreconciledPendingSelection(pending, session, `Session started, but it could not be selected: ${errorMessage(error)}`);
+    }
+  }
+
+  private pendingStartExpectedNavigation(pending: PendingSessionStart): NavigationSelection {
+    const current = this.navigationSelection();
+    if (pending.pendingUrlPublished) return current;
+    // An updateUrl:false start leaves an already selected session in the
+    // address bar while its temporary row is rendered. The controller's
+    // capture intentionally omits that temporary row, so retain the route
+    // session id captured before the start and refresh only the live surface.
+    return { ...current, sessionId: pending.expectedNavigation.sessionId };
+  }
+
+  private clearUnreconciledPendingSelection(pending: PendingSessionStart, session: SessionInfo, message?: string): void {
+    const selectedId = this.getState().selectedSession?.id;
+    if (selectedId !== pending.tempId && selectedId !== session.id) return;
+    this.clearActiveSession();
+    if (message !== undefined) this.setState({ error: message });
   }
 
   private failPendingSessionStart(tempId: string, error: unknown): void {
