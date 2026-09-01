@@ -6,6 +6,7 @@ import type { WorkspaceFilesCapabilityV1, WorkspacePanelContext as PublicWorkspa
 import type { Machine, Project, SessionInfo, Workspace } from "../api";
 import { initialAppState } from "../appState";
 import type { MachineNavigationSnapshot } from "../controllers/machineNavigationMemory";
+import { SessionController } from "../controllers/sessionController";
 import { loadExternalPlugins, type PluginManifestEntry } from "../plugins/external";
 import { PluginRegistry } from "../plugins/registry";
 import type { PiWebPlugin, PluginRuntimeContext, WorkspaceInvalidation, WorkspacePanelContext, WorkspacePanelNavigationV1 } from "../plugins/types";
@@ -252,6 +253,79 @@ describe("PiWebApp plugin host", () => {
     expect(appState(app).selectedSession?.id).toBe(nextSession.id);
   });
 
+  it("publishes Chat before starting a session from another workspace view", async () => {
+    const previousSession: SessionInfo = { id: "session-old", cwd: workspace.path, path: "/repo/.sessions/session-old", created: "now", modified: "now", messageCount: 0, firstMessage: "" };
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&session=session-old&tool=core%3Aworkspace.terminal&view=core%3Aworkspace.terminal");
+    const app = new PiWebApp();
+    if (!Reflect.set(app, "focusChatComposer", () => { callAppMethod(app, "selectMainView", "chat", { invalidateNavigationSelection: false }); })) throw new Error("Could not stub chat focus");
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      selectedSession: previousSession,
+      sessions: [previousSession],
+      workspaceTool: "core:workspace.terminal",
+      mainView: "core:workspace.terminal",
+    });
+    const sessions: unknown = Reflect.get(app, "sessions");
+    if (!(sessions instanceof SessionController)) throw new Error("PiWebApp session controller was unavailable");
+    let viewAtStart: string | null = null;
+    vi.spyOn(sessions, "startSession").mockImplementation(() => {
+      viewAtStart = browser.url.searchParams.get("view");
+      return Promise.resolve();
+    });
+
+    await callAsyncAppMethod(app, "startSessionAndOpenChat");
+
+    expect(viewAtStart).toBe("chat");
+    expect(browser.url.searchParams.get("view")).toBe("chat");
+    expect(browser.url.searchParams.get("session")).toBe(previousSession.id);
+  });
+
+  it("does not focus a selection after Back/Forward supersedes it", async () => {
+    const app = createApp();
+    const focusNavigationTarget = vi.fn();
+    if (!Reflect.set(app, "focusNavigationTarget", focusNavigationTarget)) throw new Error("Could not stub navigation focus");
+    if (!Reflect.set(app, "restoreRoute", () => Promise.resolve(true))) throw new Error("Could not stub popstate route restore");
+    let releaseAction: (() => void) | undefined;
+    const action = new Promise<void>((resolve) => { releaseAction = resolve; });
+
+    const selection = callAppMethod(app, "selectNavigationItem", "sessions", "chat", () => action);
+    await Promise.resolve();
+    callAppMethod(app, "onPopState");
+    releaseAction?.();
+    await selection;
+
+    expect(focusNavigationTarget).not.toHaveBeenCalled();
+  });
+
+  it("does not focus a selection after a newer main-view navigation", async () => {
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&view=core%3Aworkspace.terminal");
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceTool: "core:workspace.terminal",
+      mainView: "core:workspace.terminal",
+    });
+    const focusNavigationTarget = vi.fn();
+    if (!Reflect.set(app, "focusNavigationTarget", focusNavigationTarget)) throw new Error("Could not stub navigation focus");
+    let releaseAction: (() => void) | undefined;
+    const action = new Promise<void>((resolve) => { releaseAction = resolve; });
+
+    const selection = callAppMethod(app, "selectNavigationItem", "sessions", "chat", () => action);
+    await Promise.resolve();
+    callAppMethod(app, "selectMainView", "chat");
+    releaseAction?.();
+    await selection;
+
+    expect(browser.url.searchParams.get("view")).toBe("chat");
+    expect(focusNavigationTarget).not.toHaveBeenCalled();
+  });
+
   it("publishes a runtime terminal destination before recovering its workspace", async () => {
     const previousProject: Project = { id: "project-old", name: "Old project", path: "/old", createdAt: "now" };
     const nextProject: Project = { id: "project-next", name: "Next project", path: "/next", createdAt: "now" };
@@ -407,6 +481,62 @@ describe("PiWebApp plugin host", () => {
     expect(browser.url.searchParams.has("project")).toBe(false);
     expect(browser.url.searchParams.has("workspace")).toBe(false);
     expect(browser.url.searchParams.has("browser-only.workspace.panel--file")).toBe(false);
+  });
+
+  it("normalizes a missing session route while retaining its workspace", async () => {
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&session=deleted-session&view=chat");
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(),
+      projects: [project],
+      selectedProject: project,
+      workspaces: [workspace],
+      selectedWorkspace: workspace,
+      sessions: [],
+      workspaceTool: "core:workspace.terminal",
+      mainView: "chat",
+    });
+    markPluginLoadingReady(app);
+    stubWorkspaceProjectSelection(app, () => {
+      setAppState(app, {
+        ...appState(app),
+        selectedProject: project,
+        selectedWorkspace: workspace,
+        workspaces: [workspace],
+        sessions: [],
+        selectedSession: undefined,
+      });
+    });
+
+    await callAsyncAppMethod(app, "restoreRoute", false);
+
+    expect(browser.url.searchParams.get("project")).toBe(project.id);
+    expect(browser.url.searchParams.get("workspace")).toBe(workspace.id);
+    expect(browser.url.searchParams.has("session")).toBe(false);
+    expect(appState(app).selectedSession).toBeUndefined();
+  });
+
+  it("keeps an unavailable machine route explicit instead of resolving it locally", async () => {
+    const browser = installBrowserWindow("http://localhost/app?machine=removed-machine&project=project-1&workspace=workspace-1&view=chat");
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(),
+      machines: [{ id: "local", name: "Local", kind: "local", createdAt: "now", updatedAt: "now" }],
+      selectedMachine: { id: "local", name: "Local", kind: "local", createdAt: "now", updatedAt: "now" },
+      projects: [project],
+      selectedProject: project,
+      workspaces: [workspace],
+      selectedWorkspace: workspace,
+      workspaceTool: "core:workspace.terminal",
+      mainView: "chat",
+    });
+
+    await callAsyncAppMethod(app, "restoreRoute", false);
+
+    expect(browser.url.searchParams.get("machine")).toBe("removed-machine");
+    expect(appState(app).selectedProject).toBeUndefined();
+    expect(appState(app).selectedWorkspace).toBeUndefined();
+    expect(appState(app).error).toContain("Machine not found");
   });
 
   it("does not let an older committed selection replace a newer URL destination", async () => {
@@ -619,6 +749,43 @@ describe("PiWebApp plugin host", () => {
     expect(browser.url.searchParams.get("browser-only.workspace.panel--mode")).toBeNull();
   });
 
+  it("ignores terminal actions from a stale workspace panel context", async () => {
+    const nextProject: Project = { id: "project-next", name: "Next project", path: "/next", createdAt: "now" };
+    const nextWorkspace: Workspace = { id: "workspace-next", projectId: nextProject.id, path: "/next", label: "Next", isMain: true, effectiveConfig: {} };
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&view=chat");
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceTool: "core:workspace.terminal",
+      mainView: "chat",
+    });
+    const staleContext = workspacePanelContextFromApp(app);
+    browser.navigate("http://localhost/app?project=project-next&workspace=workspace-next&view=chat");
+    setAppState(app, {
+      ...appState(app),
+      selectedProject: nextProject,
+      selectedWorkspace: nextWorkspace,
+      workspaces: [nextWorkspace],
+      selectedTerminalId: undefined,
+    });
+
+    staleContext.terminal.open({ terminalId: "stale-terminal" });
+    staleContext.onSelectTerminal("stale-terminal");
+    const command = staleContext.terminal.runCommand({ title: "Stale command", command: "echo stale", open: true });
+    const unstableCommand = staleContext.piWebUnstable?.terminalCommandRuns.runCommand({ workspace, title: "Stale command", command: "echo stale", open: true });
+    staleContext.piWebUnstable?.terminalCommandRuns.open({ terminalId: "stale-terminal" });
+
+    await expect(command).rejects.toThrow("Workspace panel context is no longer current");
+    if (unstableCommand !== undefined) await expect(unstableCommand).rejects.toThrow("Workspace panel context is no longer current");
+    expect(browser.pushed).toHaveLength(0);
+    expect(browser.url.searchParams.get("project")).toBe(nextProject.id);
+    expect(browser.url.searchParams.get("workspace")).toBe(nextWorkspace.id);
+    expect(appState(app).selectedTerminalId).toBeUndefined();
+  });
+
   it("restores Files legacy routes and query-only history through the real runtime invalidation path", async () => {
     const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&tool=files&view=core%3Aworkspace.files&core.workspace.files--file=legacy.ts&core.workspace.files--mode=preview");
     const app = new PiWebApp();
@@ -714,7 +881,7 @@ describe("PiWebApp plugin host", () => {
         selectedSession: undefined,
         error: "",
       });
-      return Promise.resolve();
+      return Promise.resolve(true);
     })) throw new Error("Could not stub machine route selection");
 
     type TestFileContent = Awaited<ReturnType<WorkspaceFilesCapabilityV1["readFile"]>>;
@@ -1453,7 +1620,7 @@ function markPluginLoadingReady(app: PiWebApp, loadedMachineIds: readonly string
 function stubRouteMachineSelection(app: PiWebApp, applySelection: () => void): void {
   if (!Reflect.set(app, "restoreRouteMachine", () => {
     applySelection();
-    return Promise.resolve();
+    return Promise.resolve(true);
   })) throw new Error("Could not stub machine route selection");
 }
 

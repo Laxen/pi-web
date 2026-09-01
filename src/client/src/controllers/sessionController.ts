@@ -233,6 +233,10 @@ export class SessionController {
     const pending = this.createPendingSessionStart(workspace, machineId, this.navigationSelection(), pendingUrlPublished);
     this.pendingSessionStarts.set(pending.tempId, pending);
     this.insertAndSelectPendingSession(pending.session, { updateUrl: options?.updateUrl });
+    // When the temporary row is published, its session id is intentionally
+    // omitted from the URL. The stable handshake must therefore expect the
+    // post-publication route, not the route captured before the row existed.
+    if (pendingUrlPublished) pending.expectedNavigation = this.navigationSelection();
     try {
       const session = await this.api.startSession(workspace.path, machineId, pending.tempId);
       await this.resolvePendingSessionStart(pending.tempId, session);
@@ -1377,9 +1381,9 @@ export class SessionController {
           expected: pending.expectedNavigation,
         });
       } else {
+        await this.selectSession(cachedSession, { updateUrl: false });
         if (pending.pendingUrlPublished) this.updateUrl({ replace: true });
         else this.updateUrl();
-        await this.selectSession(cachedSession, { updateUrl: false });
       }
     }
     await this.flushQueuedPendingSends(cachedSession, pending.machineId, queuedSends);

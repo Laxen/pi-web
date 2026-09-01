@@ -81,6 +81,44 @@ describe("SessionController pending starts", () => {
     expect(state.selectedSession?.id).toBe(started.id);
   });
 
+  it("captures the post-publication route when a pending row removes the session id", async () => {
+    const started: SessionInfo = { ...oldSession, id: "started-session", path: "/tmp/started-session.jsonl" };
+    const startRequest = deferred<SessionInfo>();
+    let state: AppState = { ...initialAppState(), selectedWorkspace: workspace, selectedSession: oldSession, sessions: [oldSession] };
+    let publishedSessionId: string | undefined = oldSession.id;
+    let expectedSessionId: string | undefined;
+    const controller = new SessionController(
+      () => state,
+      (patch) => { state = { ...state, ...patch }; },
+      () => { publishedSessionId = undefined; },
+      undefined,
+      {
+        api: {
+          ...defaultApi,
+          startSession: () => startRequest.promise,
+        },
+        socket: new FakeSocket(),
+        captureNavigation: () => ({
+          machineId: "local",
+          workspaceId: workspace.id,
+          sessionId: publishedSessionId,
+        }),
+        navigateToSession: (session, options) => {
+          expectedSessionId = options?.expected?.sessionId;
+          state = { ...state, selectedSession: session };
+          return Promise.resolve(true);
+        },
+      },
+    );
+
+    const start = controller.startSession();
+    startRequest.resolve(started);
+    await start;
+
+    expect(expectedSessionId).toBeUndefined();
+    expect(state.selectedSession?.id).toBe(started.id);
+  });
+
   it("does not duplicate a started session when its session.created broadcast races the HTTP response", async () => {
     const storage = new MemoryStorage();
     Object.defineProperty(globalThis, "localStorage", { value: storage, configurable: true });

@@ -272,10 +272,13 @@ export class PiWebApp extends LitElement {
   @state() private workspaceUploadDefaultFolder = effectiveWorkspaceUploadFolder(undefined);
   @state() private workspaceAttachmentsDefaultFolder = effectiveWorkspaceAttachmentsFolder(undefined);
   private sessionWarningVisibility = initialSessionWarningVisibilityState();
-  private readonly onPopState = () => void this.withChatScrollTransition(async () => {
-    this.restoreSettingsRoute();
-    await this.restoreRoute(false);
-  });
+  private readonly onPopState = () => {
+    this.invalidateNavigationSelection();
+    void this.withChatScrollTransition(async () => {
+      this.restoreSettingsRoute();
+      await this.restoreRoute(false);
+    });
+  };
   private readonly onPageShow = () => {
     void this.sessionUnread.refreshAll();
     this.appShell.repairViewportPosition();
@@ -286,6 +289,10 @@ export class PiWebApp extends LitElement {
   };
   private get routeRestoreInProgress(): boolean {
     return this.routeRestoreDepth > 0;
+  }
+
+  private invalidateNavigationSelection(): void {
+    this.navigationSelectionSeq += 1;
   }
 
   private readonly onKeyDown = (event: KeyboardEvent) => {
@@ -608,7 +615,13 @@ export class PiWebApp extends LitElement {
     this.routeRestoreDepth += 1;
     this.restoringRouteTerminalId = routeSurface.selectedTerminalId;
     try {
-      await this.restoreRouteMachine(parsedRoute, false);
+      const machineResolved = await this.restoreRouteMachine(parsedRoute, false);
+      if (!machineResolved) {
+        if (!this.isCurrentRouteRestore(restoreSeq)) return;
+        this.workspaces.clearSelection({ updateUrl: false });
+        this.setState({ selectedTerminalId: undefined, error: `Machine not found: ${parsedRoute.machineId ?? "local"}` });
+        return;
+      }
       await this.loadPluginsForSelectedMachine();
       if (!this.isCurrentRouteRestore(restoreSeq)) return;
       const route = resolveAppRoute(parsedRoute, (value) => this.plugins.resolveWorkspacePanelRouteId(value, selectedMachineId(this.state)));
@@ -686,7 +699,13 @@ export class PiWebApp extends LitElement {
     const requestedWorkspaceUnavailable = options.requestedRoute?.workspaceId !== undefined
       && (this.state.selectedProject?.id !== options.requestedRoute.projectId
         || this.state.selectedWorkspace?.id !== options.requestedRoute.workspaceId);
-    const normalizeUnavailableRoute = options.normalizeUnavailableRoute || requestedToolUnavailable || requestedViewUnavailable || requestedWorkspaceUnavailable;
+    const requestedSessionUnavailable = options.requestedRoute?.sessionId !== undefined
+      && !sessionMatchesRouteTarget(this.state.selectedSession?.id, options.requestedRoute.sessionId);
+    const normalizeUnavailableRoute = options.normalizeUnavailableRoute
+      || requestedToolUnavailable
+      || requestedViewUnavailable
+      || requestedWorkspaceUnavailable
+      || requestedSessionUnavailable;
     if (options.unavailablePanelViewRoute || requestedViewUnavailable) {
       const fallback = this.effectiveWorkspaceTool(panels);
       if (fallback !== undefined) this.setState({ mainView: fallback });
@@ -853,12 +872,13 @@ export class PiWebApp extends LitElement {
     this.remoteRouteRestoreTimer = undefined;
   }
 
-  private async restoreRouteMachine(route: ParsedAppRoute, updateUrl: boolean): Promise<void> {
+  private async restoreRouteMachine(route: ParsedAppRoute, updateUrl: boolean): Promise<boolean> {
     const routeMachineId = route.machineId ?? "local";
-    if (this.state.selectedMachine?.id === routeMachineId) return;
+    if (selectedMachineId(this.state) === routeMachineId) return true;
     const machine = this.state.machines.find((candidate) => candidate.id === routeMachineId);
-    if (machine === undefined) return;
+    if (machine === undefined) return false;
     await this.machines.selectMachine(machine, { updateUrl });
+    return this.state.selectedMachine?.id === routeMachineId;
   }
 
   private routeMatchesCurrentSelection(route: AppRoute): boolean {
@@ -1100,9 +1120,10 @@ export class PiWebApp extends LitElement {
     return snapshot.projectId !== undefined && this.state.selectedProject?.id !== snapshot.projectId && this.state.error !== "";
   }
 
-  private openWorkspaceTool(tool: QualifiedContributionId) {
+  private openWorkspaceTool(tool: QualifiedContributionId, options: { invalidateNavigationSelection?: boolean | undefined } = {}) {
     const availableTool = this.availableWorkspacePanelId(tool);
     if (availableTool === undefined) return;
+    if (options.invalidateNavigationSelection !== false) this.invalidateNavigationSelection();
     if (availableTool === "core:workspace.terminal") this.terminalAutoStartWorkspaceId = this.state.selectedWorkspace?.id;
     const currentSnapshot = machineNavigationSnapshotFromState(this.state, this.currentContributionQueryForState());
     this.commitMachineNavigationSnapshot({ ...currentSnapshot, tool: availableTool, view: availableTool });
@@ -1192,11 +1213,12 @@ export class PiWebApp extends LitElement {
     return `${selectedMachineId(this.state)}:${workspace.path}`;
   }
 
-  private selectMainView(view: AppState["mainView"]) {
+  private selectMainView(view: AppState["mainView"], options: { invalidateNavigationSelection?: boolean | undefined } = {}) {
     if (view !== "navigation" && view !== "chat") {
-      this.openWorkspaceTool(view);
+      this.openWorkspaceTool(view, options);
       return;
     }
+    if (options.invalidateNavigationSelection !== false) this.invalidateNavigationSelection();
     const currentSnapshot = machineNavigationSnapshotFromState(this.state, this.currentContributionQueryForState());
     this.commitMachineNavigationSnapshot({ ...currentSnapshot, view });
     this.setState({ mainView: view });
@@ -1602,7 +1624,7 @@ export class PiWebApp extends LitElement {
     }, isCurrentSelection);
 
     if (!isCurrentSelection()) return;
-    await this.focusNavigationTarget(nextTarget);
+    await this.focusNavigationTarget(nextTarget, isCurrentSelection);
   }
 
   private async startSessionFromNavigation(): Promise<void> {
@@ -1614,44 +1636,61 @@ export class PiWebApp extends LitElement {
   }
 
   private async startSessionAndOpenChat(shouldComplete: () => boolean = () => true): Promise<void> {
-    // `startSession()` remains in flight until the backend session resolves;
-    // open the chat as soon as the controller has inserted the temporary row.
+    // Publish the synchronous Chat destination before capturing the route that
+    // the stable-session handshake must replace. Otherwise the handshake can
+    // reject its own completion after focus changes the view.
+    const navigationSeq = this.navigationSelectionSeq;
+    const isCurrent = () => navigationSeq === this.navigationSelectionSeq && shouldComplete();
+    if (isCurrent()) await this.focusChatComposer(isCurrent);
+    if (!isCurrent()) return;
     const start = this.sessions.startSession({ updateUrl: false }).catch((error: unknown) => {
-      if (shouldComplete()) this.setState({ error: String(error) });
+      if (isCurrent()) this.setState({ error: String(error) });
     });
-    if (shouldComplete()) await this.focusChatComposer();
     void start;
   }
 
-  private async focusNavigationTarget(target: NavigationFocusTarget): Promise<void> {
+  private async focusNavigationTarget(target: NavigationFocusTarget, shouldComplete: () => boolean = () => true): Promise<void> {
+    const navigationSeq = this.navigationSelectionSeq;
+    const isCurrent = () => navigationSeq === this.navigationSelectionSeq && shouldComplete();
+    if (!isCurrent()) return;
     if (target === "chat") {
-      await this.focusChatComposer();
+      await this.focusChatComposer(isCurrent);
       return;
     }
-    await this.focusNavigationSection(target);
+    await this.focusNavigationSection(target, isCurrent);
   }
 
-  private async focusNavigationSection(section: NavigationSection): Promise<void> {
+  private async focusNavigationSection(section: NavigationSection, shouldComplete: () => boolean = () => true): Promise<void> {
+    const navigationSeq = this.navigationSelectionSeq;
+    const isCurrent = () => navigationSeq === this.navigationSelectionSeq && shouldComplete();
+    if (!isCurrent()) return;
     if (section === "machines" && !shouldShowMachinesSection(this.state.machines)) {
-      await this.focusNavigationSection("projects");
+      await this.focusNavigationSection("projects", isCurrent);
       return;
     }
+    if (!isCurrent()) return;
     this.panelCollapse.expandNavigationPanel();
-    if (this.appShell.isMobileNavigationLayout) this.selectMainView("navigation");
+    if (this.appShell.isMobileNavigationLayout) this.selectMainView("navigation", { invalidateNavigationSelection: false });
     this.navigationSections.expand(section);
     await this.updateComplete;
+    if (!isCurrent()) return;
     await nextFrame();
+    if (!isCurrent()) return;
     await this.navigationPanel?.focusSection(section);
   }
 
-  private async focusChatComposer(): Promise<void> {
-    if (this.state.mainView !== "chat") this.selectMainView("chat");
+  private async focusChatComposer(shouldComplete: () => boolean = () => true): Promise<void> {
+    const navigationSeq = this.navigationSelectionSeq;
+    const isCurrent = () => navigationSeq === this.navigationSelectionSeq && shouldComplete();
+    if (!isCurrent()) return;
+    if (this.state.mainView !== "chat") this.selectMainView("chat", { invalidateNavigationSelection: false });
     await this.updateComplete;
+    if (!isCurrent()) return;
     await nextFrame();
     // The focus request may outlive the dialog transition that scheduled it.
     // Recheck the rendered boundary at the final side-effect point so a newer
     // or surviving modal keeps visual and keyboard focus ownership.
-    if (this.isRenderedModalOpen()) return;
+    if (!isCurrent() || this.isRenderedModalOpen()) return;
     this.promptEditor?.focusInput();
   }
 
@@ -1823,6 +1862,7 @@ export class PiWebApp extends LitElement {
       navigationAliases: readonly QualifiedContributionId[] = [],
     ): WorkspacePanelContext => {
       const terminalCommandRuns = this.terminalCommandRunsForOrigin(binding.registrationPluginId, machineId);
+      const scopedTerminalCommandRuns = this.createWorkspaceTerminalCommandRuns(terminalCommandRuns, workspace, machine);
       const backend = createPluginWorkspaceBackend(binding, workspace, machineId);
       return installWorkspacePanelScope({
         machine,
@@ -1832,22 +1872,65 @@ export class PiWebApp extends LitElement {
         ...(backend === undefined ? {} : { backend }),
         prompt: this.createPromptEditor(),
         terminal: {
-          open: (options) => { void this.openRuntimeTerminal(machineId, workspace, { ...options, expected: terminalNavigationContextFromState(this.state) }); },
-          runCommand: (input) => terminalCommandRuns.runCommand({ ...input, workspace }),
+          open: (options) => {
+            if (!this.workspacePanelContextIsCurrent(workspace, machine)) return;
+            void this.openRuntimeTerminal(machineId, workspace, { ...options, expected: terminalNavigationContextFromState(this.state) });
+          },
+          runCommand: (input) => scopedTerminalCommandRuns.runCommand({ ...input, workspace }),
         },
         ...(contributionId === undefined ? {} : {
           navigation: this.createWorkspacePanelNavigation(workspace, machine, contributionId, navigationAliases, contributionQueryRestore),
         }),
-        openTerminal: (options) => { void this.openRuntimeTerminal(machineId, workspace, { ...options, expected: terminalNavigationContextFromState(this.state) }); },
+        openTerminal: (options) => {
+          if (!this.workspacePanelContextIsCurrent(workspace, machine)) return;
+          void this.openRuntimeTerminal(machineId, workspace, { ...options, expected: terminalNavigationContextFromState(this.state) });
+        },
         host: this.createWorkspaceHost(),
-        piWebUnstable: { terminalCommandRuns },
+        piWebUnstable: { terminalCommandRuns: scopedTerminalCommandRuns },
         activeTerminalCount: this.state.activeTerminalCount,
         selectedTerminalId: this.state.selectedTerminalId,
         terminalAutoStart: this.terminalAutoStartWorkspaceId === workspace.id,
-        onSelectTerminal: (terminalId: string | undefined, options?: { replace?: boolean | undefined }) => { this.selectTerminal(terminalId, options); },
+        onSelectTerminal: (terminalId: string | undefined, options?: { replace?: boolean | undefined }) => {
+          if (!this.workspacePanelContextIsCurrent(workspace, machine)) return;
+          this.selectTerminal(terminalId, options);
+        },
       }, createContext);
     };
     return createContext(coreWorkspacePluginBinding());
+  }
+
+  private createWorkspaceTerminalCommandRuns(
+    terminalCommandRuns: TerminalCommandRunsInternalRuntime,
+    workspace: Workspace,
+    machine: PluginMachine,
+  ): TerminalCommandRunsInternalRuntime {
+    return {
+      runCommand: (input) => {
+        if (!this.workspacePanelContextIsCurrent(workspace, machine)
+          || input.workspace.id !== workspace.id
+          || input.workspace.projectId !== workspace.projectId) {
+          return Promise.reject(new Error("Workspace panel context is no longer current"));
+        }
+        return terminalCommandRuns.runCommand(input);
+      },
+      listCommandRuns: (filter) => terminalCommandRuns.listCommandRuns(filter),
+      getCommandRun: (runId) => terminalCommandRuns.getCommandRun(runId),
+      open: (options) => {
+        if (!this.workspacePanelContextIsCurrent(workspace, machine)) return;
+        terminalCommandRuns.open(options);
+      },
+    };
+  }
+
+  private workspacePanelContextIsCurrent(workspace: Workspace, machine: PluginMachine): boolean {
+    return selectedMachineId(this.state) === machine.id
+      && this.state.selectedProject?.id === workspace.projectId
+      && this.state.selectedWorkspace?.id === workspace.id
+      && routeMatchesWorkspaceIdentity(readRoute(), {
+        machineId: machine.id,
+        projectId: workspace.projectId,
+        workspaceId: workspace.id,
+      });
   }
 
   private createWorkspacePanelNavigation(
@@ -2728,6 +2811,10 @@ function currentBrowserUrl(): string {
 function selectedChatIdentity(state: Pick<AppState, "selectedMachine" | "selectedSession">): string | undefined {
   const session = state.selectedSession;
   return session === undefined ? undefined : unreadChatIdentity(selectedMachineId(state), session);
+}
+
+function sessionMatchesRouteTarget(selectedSessionId: string | undefined, requestedSessionId: string): boolean {
+  return selectedSessionId === requestedSessionId || selectedSessionId?.startsWith(requestedSessionId) === true;
 }
 
 function machineUnreadInputsChanged(previous: AppState, next: AppState): boolean {
