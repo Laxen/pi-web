@@ -2,17 +2,19 @@ import { api as defaultApi, type Project, type Workspace } from "../api";
 import { resetWorkspaceScopedState, type AppState } from "../appState";
 import { mergeCachedNewSessions } from "../cachedNewSessions";
 import { machineProjectKey } from "../machineKeys";
-import { selectedMachineId, type GetState, type NavigationDestinationOptions, type NavigationSelection, type RouteTarget, type SetState, type UpdateUrl } from "./types";
+import { selectedMachineId, type GetState, type NavigationDestinationOptions, type NavigationFreshness, type NavigationScope, type NavigationSelection, type RouteTarget, type SetState, type UpdateUrl } from "./types";
 import type { SessionController } from "./sessionController";
 import { TrailingRefreshCoordinator } from "./trailingRefreshCoordinator";
 import { InMemoryWorkspaceSelectionMemory, selectPreferredWorkspace, type WorkspaceSelectionMemory } from "./workspaceSelection";
 
 const WORKSPACE_TOPOLOGY_REFRESH_DEBOUNCE_MS = 50;
+const WORKSPACE_SELECTION_SCOPE = ["machine", "project", "workspace", "session"] as const;
 
 export interface WorkspaceControllerDependencies {
   api?: Pick<typeof defaultApi, "sessions" | "workspaces">;
   navigateToWorkspace?: (workspace: Workspace | undefined, options?: NavigationDestinationOptions) => Promise<boolean>;
   captureNavigation?: () => NavigationSelection;
+  beginNavigationOperation?: (scope: readonly NavigationScope[]) => NavigationFreshness;
   onBackgroundError?: (message: string, error: unknown) => void;
   topologyRefreshDebounceMs?: number;
 }
@@ -21,6 +23,7 @@ export class WorkspaceController {
   private readonly api: Pick<typeof defaultApi, "sessions" | "workspaces">;
   private readonly navigateToWorkspace: WorkspaceControllerDependencies["navigateToWorkspace"];
   private readonly captureNavigation: WorkspaceControllerDependencies["captureNavigation"];
+  private readonly beginNavigationOperation: WorkspaceControllerDependencies["beginNavigationOperation"];
   private readonly onBackgroundError: (message: string, error: unknown) => void;
   private readonly topologyRefreshes: TrailingRefreshCoordinator<string>;
 
@@ -35,6 +38,7 @@ export class WorkspaceController {
     this.api = deps.api ?? defaultApi;
     this.navigateToWorkspace = deps.navigateToWorkspace;
     this.captureNavigation = deps.captureNavigation;
+    this.beginNavigationOperation = deps.beginNavigationOperation;
     this.onBackgroundError = deps.onBackgroundError ?? ((message, error) => { console.warn(message, error); });
     this.topologyRefreshes = new TrailingRefreshCoordinator(
       deps.topologyRefreshDebounceMs ?? WORKSPACE_TOPOLOGY_REFRESH_DEBOUNCE_MS,
@@ -53,36 +57,49 @@ export class WorkspaceController {
     this.setState({ workspacesByProjectId });
   }
 
-  async selectProject(project: Project, target?: RouteTarget) {
+  async selectProject(project: Project, target?: RouteTarget): Promise<void> {
+    const navigation = target?.navigation ?? this.beginNavigationOperation?.(WORKSPACE_SELECTION_SCOPE);
+    if (!this.navigationIsCurrent(navigation)) return;
     const machineId = selectedMachineId(this.getState());
     this.sessions.clearActiveSession();
     this.setState({ selectedProject: project, selectedWorkspace: undefined, workspaces: [], isLoadingWorkspaces: true, ...resetWorkspaceScopedState() });
     try {
       const workspaces = await this.api.workspaces(project.id, machineId);
-      if (selectedMachineId(this.getState()) !== machineId || this.getState().selectedProject?.id !== project.id) return;
+      if (!this.navigationIsCurrent(navigation)
+        || selectedMachineId(this.getState()) !== machineId
+        || this.getState().selectedProject?.id !== project.id) return;
       this.setState({ workspaces, workspacesByProjectId: { ...this.getState().workspacesByProjectId, [project.id]: workspaces }, isLoadingWorkspaces: false });
       const workspace = selectPreferredWorkspace(workspaces, { targetWorkspaceId: target?.workspaceId, latestWorkspaceId: this.workspaceSelection.latestWorkspaceId(machineProjectKey(machineId, project.id)) });
-      if (workspace) await this.selectWorkspace(workspace, { sessionId: target?.sessionId, updateUrl: target?.updateUrl });
-      else if (target?.updateUrl !== false) this.updateUrl();
+      if (workspace) {
+        await this.selectWorkspace(workspace, { sessionId: target?.sessionId, updateUrl: target?.updateUrl, navigation });
+        return;
+      }
+      if (target?.updateUrl !== false && this.navigationIsCurrent(navigation)) this.updateUrl();
     } catch (error) {
-      if (selectedMachineId(this.getState()) === machineId && this.getState().selectedProject?.id === project.id) this.setState({ error: String(error), isLoadingWorkspaces: false });
+      if (this.navigationIsCurrent(navigation) && selectedMachineId(this.getState()) === machineId && this.getState().selectedProject?.id === project.id) this.setState({ error: String(error), isLoadingWorkspaces: false });
     }
   }
 
-  async selectWorkspace(workspace: Workspace, target?: { sessionId?: string | undefined; updateUrl?: boolean | undefined }) {
+  async selectWorkspace(workspace: Workspace, target?: RouteTarget): Promise<void> {
+    const navigation = target?.navigation ?? this.beginNavigationOperation?.(WORKSPACE_SELECTION_SCOPE);
+    if (!this.navigationIsCurrent(navigation)) return;
     const machineId = selectedMachineId(this.getState());
     this.workspaceSelection.rememberWorkspace({ ...workspace, projectId: machineProjectKey(machineId, workspace.projectId) });
     this.sessions.clearActiveSession();
     this.setState({ selectedWorkspace: workspace, isLoadingWorkspaces: false, ...resetWorkspaceScopedState() });
     try {
       const sessions = mergeCachedNewSessions(workspace.path, await this.api.sessions(workspace.path, machineId), machineId);
-      if (selectedMachineId(this.getState()) !== machineId || this.getState().selectedWorkspace?.id !== workspace.id || this.getState().selectedProject?.id !== workspace.projectId) return;
+      if (!this.navigationIsCurrent(navigation)
+        || selectedMachineId(this.getState()) !== machineId
+        || this.getState().selectedWorkspace?.id !== workspace.id
+        || this.getState().selectedProject?.id !== workspace.projectId) return;
       this.setState({ sessions });
       const session = this.sessions.preferredSession(workspace.path, sessions, target?.sessionId);
-      if (session) await this.sessions.selectSession(session, { updateUrl: target?.updateUrl });
-      else if (target?.updateUrl !== false) this.updateUrl();
+      if (session) await this.sessions.selectSession(session, { updateUrl: target?.updateUrl, ...(navigation === undefined ? {} : { navigation }) });
+      else if (target?.updateUrl !== false && this.navigationIsCurrent(navigation)) this.updateUrl();
+      if (!this.navigationIsCurrent(navigation)) return;
     } catch (error) {
-      if (selectedMachineId(this.getState()) === machineId && this.getState().selectedWorkspace?.id === workspace.id) this.setState({ error: String(error) });
+      if (this.navigationIsCurrent(navigation) && selectedMachineId(this.getState()) === machineId && this.getState().selectedWorkspace?.id === workspace.id) this.setState({ error: String(error) });
     }
   }
 
@@ -131,15 +148,19 @@ export class WorkspaceController {
 
   async refreshAfterWorkspaceDeleted(projectId: string, workspaceId: string): Promise<void> {
     const machineId = selectedMachineId(this.getState());
+    const navigation = this.beginNavigationOperation?.(WORKSPACE_SELECTION_SCOPE);
     const workspaces = await this.refreshProjectWorkspaces(projectId);
     const state = this.getState();
-    if (selectedMachineId(state) !== machineId || state.selectedProject?.id !== projectId || state.selectedWorkspace?.id !== workspaceId) return;
+    if (!this.navigationIsCurrent(navigation)
+      || selectedMachineId(state) !== machineId
+      || state.selectedProject?.id !== projectId
+      || state.selectedWorkspace?.id !== workspaceId) return;
 
     const expected = navigationSelection(this.getState(), this.captureNavigation);
     const fallback = selectFallbackWorkspace(workspaces);
     if (this.navigateToWorkspace !== undefined) {
       await this.navigateToWorkspace(fallback, { expected });
-    } else if (fallback !== undefined) await this.selectWorkspace(fallback);
+    } else if (fallback !== undefined) await this.selectWorkspace(fallback, { navigation });
     else this.clearSelection();
   }
 
@@ -161,6 +182,10 @@ export class WorkspaceController {
    * teardown in `handleWorkspaceChange`. Returns nothing when the entry is gone or unchanged,
    * so an unchanged refresh does not churn object identity into state.
    */
+  private navigationIsCurrent(navigation: NavigationFreshness | undefined): boolean {
+    return navigation === undefined || navigation.isCurrent();
+  }
+
   private refreshedSelection(selected: Workspace | undefined, workspaces: Workspace[]): Pick<AppState, "selectedWorkspace"> | undefined {
     if (selected === undefined) return undefined;
     const refreshed = workspaces.find((candidate) => candidate.id === selected.id);

@@ -3,6 +3,7 @@ import type { AppState } from "../appState";
 import { initialAppState } from "../appState";
 import type { Machine, Project, SessionInfo, Workspace } from "../api";
 import type { SessionController } from "./sessionController";
+import type { NavigationFreshness, NavigationScope } from "./types";
 import { WorkspaceController, type WorkspaceControllerDependencies } from "./workspaceController";
 
 function machine(id: string): Machine {
@@ -36,6 +37,15 @@ function requireWorkspaceProvider(workspace: Workspace): NonNullable<Workspace["
 
 type LoadWorkspaces = (projectId: string, machineId?: string) => Promise<Workspace[]>;
 
+interface TestNavigationRoute {
+  machine: string;
+  project: string;
+  workspace?: string;
+  session?: string;
+  tool?: string;
+  view?: string;
+}
+
 interface Harness {
   controller: WorkspaceController;
   state: () => AppState;
@@ -48,7 +58,11 @@ interface Harness {
 function harness(
   initial: Partial<AppState>,
   loadWorkspaces: LoadWorkspaces,
-  options: { topologyRefreshDebounceMs?: number; navigateToWorkspace?: WorkspaceControllerDependencies["navigateToWorkspace"] } = {},
+  options: {
+    topologyRefreshDebounceMs?: number;
+    navigateToWorkspace?: WorkspaceControllerDependencies["navigateToWorkspace"];
+    beginNavigationOperation?: WorkspaceControllerDependencies["beginNavigationOperation"];
+  } = {},
 ): Harness {
   let state: AppState = { ...initialAppState(), ...initial };
   const setState = (patch: Partial<AppState>) => { state = { ...state, ...patch }; };
@@ -69,6 +83,7 @@ function harness(
     {
       api: { workspaces: loadWorkspaces, sessions: vi.fn<(path: string, machineId?: string) => Promise<SessionInfo[]>>().mockResolvedValue([]) },
       ...(options.navigateToWorkspace === undefined ? {} : { navigateToWorkspace: options.navigateToWorkspace }),
+      ...(options.beginNavigationOperation === undefined ? {} : { beginNavigationOperation: options.beginNavigationOperation }),
       onBackgroundError: (message, error) => { backgroundErrors.push({ message, error }); },
       topologyRefreshDebounceMs: options.topologyRefreshDebounceMs ?? 0,
     },
@@ -78,6 +93,99 @@ function harness(
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe("WorkspaceController route selection freshness", () => {
+  it("keeps the newest project and workspace after overlapping project responses complete out of order", async () => {
+    const firstProject = project("p1", "/first");
+    const secondProject = project("p2", "/second");
+    const firstWorkspace = workspace(firstProject.id, firstProject.path, { isMain: true });
+    const secondWorkspace = workspace(secondProject.id, secondProject.path, { isMain: true });
+    const pending = new Map<string, (workspaces: Workspace[]) => void>();
+    const loadWorkspaces = vi.fn((projectId: string) => new Promise<Workspace[]>((resolve) => {
+      pending.set(projectId, resolve);
+    }));
+    let route: TestNavigationRoute = { machine: "local", project: firstProject.id, workspace: firstWorkspace.id, view: "chat", tool: "core:workspace.terminal" };
+    const beginNavigationOperation = (scope: readonly NavigationScope[]): NavigationFreshness => {
+      const expected = { ...route };
+      return {
+        generation: 0,
+        scope,
+        isCurrent: () => scope.every((field) => route[field] === expected[field]),
+      };
+    };
+    const test = harness(
+      {
+        selectedMachine: machine("local"),
+        projects: [firstProject, secondProject],
+      },
+      loadWorkspaces,
+      { beginNavigationOperation },
+    );
+
+    const firstSelection = test.controller.selectProject(firstProject);
+    route = { ...route, project: secondProject.id, workspace: secondWorkspace.id };
+    const secondSelection = test.controller.selectProject(secondProject);
+
+    pending.get(secondProject.id)?.([secondWorkspace]);
+    await vi.waitFor(() => { expect(test.state().selectedWorkspace?.id).toBe(secondWorkspace.id); });
+    pending.get(firstProject.id)?.([firstWorkspace]);
+    await Promise.all([firstSelection, secondSelection]);
+
+    expect(test.state().selectedProject?.id).toBe(secondProject.id);
+    expect(test.state().selectedWorkspace?.id).toBe(secondWorkspace.id);
+    expect(test.state().workspaces).toEqual([secondWorkspace]);
+  });
+
+  it("allows completion when only a view outside the selection scope changes", async () => {
+    const repo = project("p1", "/repo");
+    const main = workspace(repo.id, repo.path, { isMain: true });
+    let resolveWorkspaces: ((workspaces: Workspace[]) => void) | undefined;
+    const loadWorkspaces = vi.fn().mockReturnValue(new Promise<Workspace[]>((resolve) => { resolveWorkspaces = resolve; }));
+    let route: TestNavigationRoute = { machine: "local", project: repo.id, view: "chat" };
+    const expected = { ...route };
+    const navigation: NavigationFreshness = {
+      generation: 1,
+      scope: ["machine", "project", "workspace", "session"],
+      isCurrent: () => route.machine === expected.machine
+        && route.project === expected.project
+        && route.workspace === expected.workspace
+        && route.session === expected.session,
+    };
+    const test = harness({ selectedMachine: machine("local"), projects: [repo] }, loadWorkspaces);
+
+    const selection = test.controller.selectProject(repo, { navigation });
+    route = { ...route, view: "core:workspace.terminal" };
+    resolveWorkspaces?.([main]);
+    await selection;
+
+    expect(test.state().selectedProject).toBe(repo);
+    expect(test.state().selectedWorkspace).toBe(main);
+    expect(test.state().workspaces).toEqual([main]);
+  });
+
+  it("discards completion when a workspace URL field inside the selection scope changes", async () => {
+    const repo = project("p1", "/repo");
+    const main = workspace(repo.id, repo.path, { isMain: true });
+    let resolveWorkspaces: ((workspaces: Workspace[]) => void) | undefined;
+    const loadWorkspaces = vi.fn().mockReturnValue(new Promise<Workspace[]>((resolve) => { resolveWorkspaces = resolve; }));
+    let workspaceRoute = "requested-workspace";
+    const navigation: NavigationFreshness = {
+      generation: 1,
+      scope: ["machine", "project", "workspace", "session"],
+      isCurrent: () => workspaceRoute === "requested-workspace",
+    };
+    const test = harness({ selectedMachine: machine("local"), projects: [repo] }, loadWorkspaces);
+
+    const selection = test.controller.selectProject(repo, { workspaceId: main.id, navigation });
+    workspaceRoute = "newer-workspace";
+    resolveWorkspaces?.([main]);
+    await selection;
+
+    expect(test.state().selectedProject).toBe(repo);
+    expect(test.state().selectedWorkspace).toBeUndefined();
+    expect(test.state().workspaces).toEqual([]);
+  });
 });
 
 describe("WorkspaceController.refreshSelectedProjectTopology", () => {

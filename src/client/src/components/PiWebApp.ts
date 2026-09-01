@@ -19,7 +19,7 @@ import { SessionStorageSessionSelectionMemory } from "../controllers/sessionSele
 import { SessionStorageTerminalSelectionMemory } from "../controllers/terminalSelection";
 import { SessionStorageWorkspaceSelectionMemory } from "../controllers/workspaceSelection";
 import { KeyboardShortcutDispatcher } from "../keyboardShortcuts";
-import { selectedMachineId, type NavigationDestinationOptions, type NavigationSelection } from "../controllers/types";
+import { selectedMachineId, type NavigationDestinationOptions, type NavigationFreshness, type NavigationScope, type NavigationSelection } from "../controllers/types";
 import { machineSessionKey } from "../machineKeys";
 import { sessionCleanupRequestKey } from "../sessionCleanupUi";
 import { selectedNotificationView } from "../sessionNotifications";
@@ -90,6 +90,9 @@ const TERMINAL_ROUTE_NAMESPACE = queryNamespace("core:workspace.terminal");
 const MIN_RESIZABLE_CHAT_WIDTH_PX = 320;
 const PANEL_EDGE_COLUMNS_WIDTH_PX = 2;
 const DESKTOP_SIDE_BY_SIDE_MEDIA_QUERY = "(min-width: 1181px)";
+const NAVIGATION_SCOPES = ["machine", "project", "workspace", "session", "tool", "view"] as const;
+const ROUTE_RESTORE_SCOPE = NAVIGATION_SCOPES;
+const WORKSPACE_SURFACE_SCOPE = ["tool", "view"] as const;
 
 type WorkspaceRouteUrlPublication = "current-url" | "deferred";
 
@@ -103,6 +106,7 @@ interface WorkspaceRouteFinishOptions {
   restoredWorkspaceIdentity?: WorkspaceRouteIdentity | undefined;
   requestedRoute?: ParsedAppRoute | undefined;
   restoreSeq?: number | undefined;
+  navigation?: NavigationFreshness | undefined;
 }
 
 interface WorkspaceContributionQueryRestore {
@@ -193,6 +197,7 @@ export class PiWebApp extends LitElement {
     {
       navigateToWorkspace: (workspace, options) => this.navigateToWorkspaceFromController(workspace, options),
       captureNavigation: () => navigationSelectionFromState(this.state),
+      beginNavigationOperation: (scope) => this.beginNavigationOperation(scope),
     },
   );
   private readonly projects = new ProjectController(
@@ -252,6 +257,16 @@ export class PiWebApp extends LitElement {
   private runtimeTerminalNavigationSeq = 0;
   private modelDialogInstanceId = 0;
   private routeRestoreSeq = 0;
+  private navigationGeneration = 0;
+  private observedNavigationRoute: ParsedAppRoute | undefined;
+  private readonly navigationFieldGenerations: Record<NavigationScope, number> = {
+    machine: 0,
+    project: 0,
+    workspace: 0,
+    session: 0,
+    tool: 0,
+    view: 0,
+  };
   private routeRestoreDepth = 0;
   private restoringRouteTerminalId: string | undefined;
   private pendingRemoteRouteRestore: ParsedAppRoute | undefined;
@@ -274,6 +289,11 @@ export class PiWebApp extends LitElement {
   private sessionWarningVisibility = initialSessionWarningVisibilityState();
   private readonly onPopState = () => {
     this.invalidateNavigationSelection();
+    this.syncNavigationFreshness();
+    // Retire the previous restore before scheduling async reconciliation. The
+    // freshness token below handles scoped child state; this sequence also
+    // prevents an older restore from normalizing the address bar afterward.
+    this.routeRestoreSeq += 1;
     void this.withChatScrollTransition(async () => {
       this.restoreSettingsRoute();
       await this.restoreRoute(false);
@@ -611,19 +631,20 @@ export class PiWebApp extends LitElement {
   ) {
     const machineBeforeRestore = selectedMachineId(this.state);
     const routeSurface = parsedRoute.projectId === undefined || parsedRoute.projectId === "" ? emptyWorkspaceRouteSurface() : surface;
+    const navigation = this.beginNavigationOperation(ROUTE_RESTORE_SCOPE);
     const restoreSeq = ++this.routeRestoreSeq;
     this.routeRestoreDepth += 1;
     this.restoringRouteTerminalId = routeSurface.selectedTerminalId;
     try {
       const machineResolved = await this.restoreRouteMachine(parsedRoute, false);
       if (!machineResolved) {
-        if (!this.isCurrentRouteRestore(restoreSeq)) return;
+        if (!this.isCurrentRouteRestore(restoreSeq, navigation)) return;
         this.workspaces.clearSelection({ updateUrl: false });
         this.setState({ selectedTerminalId: undefined, error: `Machine not found: ${parsedRoute.machineId ?? "local"}` });
         return;
       }
       await this.loadPluginsForSelectedMachine();
-      if (!this.isCurrentRouteRestore(restoreSeq)) return;
+      if (!this.isCurrentRouteRestore(restoreSeq, navigation)) return;
       const route = resolveAppRoute(parsedRoute, (value) => this.plugins.resolveWorkspacePanelRouteId(value, selectedMachineId(this.state)));
       const unavailableToolRoute = parsedRoute.tool !== undefined && route.tool === undefined;
       const unavailablePanelViewRoute = parsedRoute.view !== undefined && parsedRoute.view !== "chat" && route.view === undefined;
@@ -637,6 +658,7 @@ export class PiWebApp extends LitElement {
         requestedView: route.view,
         requestedRoute: parsedRoute,
         restoreSeq,
+        navigation,
         ...(restoredWorkspaceIdentity === undefined ? {} : { restoredWorkspaceIdentity }),
       };
       this.setState({
@@ -673,8 +695,8 @@ export class PiWebApp extends LitElement {
         });
         return;
       }
-      await this.workspaces.selectProject(project, { workspaceId: route.workspaceId, sessionId: route.sessionId, updateUrl: false });
-      if (!this.isCurrentRouteRestore(restoreSeq)) return;
+      await this.workspaces.selectProject(project, { workspaceId: route.workspaceId, sessionId: route.sessionId, updateUrl: false, navigation });
+      if (!this.isCurrentRouteRestore(restoreSeq, navigation)) return;
       this.setState({ selectedTerminalId: routeSurface.selectedTerminalId });
       if (routeSurface.selectedTerminalId !== undefined) this.rememberSelectedTerminal(routeSurface.selectedTerminalId);
       await this.finishWorkspaceRouteRestore(routeSurface, finishOptions);
@@ -689,7 +711,7 @@ export class PiWebApp extends LitElement {
     surface: WorkspaceRouteSurface,
     options: WorkspaceRouteFinishOptions,
   ): Promise<void> {
-    if (options.restoreSeq !== undefined && !this.isCurrentRouteRestore(options.restoreSeq)) return;
+    if (options.restoreSeq !== undefined && !this.isCurrentRouteRestore(options.restoreSeq, options.navigation)) return;
     const panels = this.visibleWorkspacePanels();
     const requestedToolUnavailable = options.requestedTool !== undefined
       && this.availableWorkspacePanelId(options.requestedTool, panels) === undefined;
@@ -715,7 +737,7 @@ export class PiWebApp extends LitElement {
       ? undefined
       : { identity: options.restoredWorkspaceIdentity, query: surface.contributionQuery ?? {} };
     await this.refreshRestoredWorkspaceTool(this.state.workspaceTool, contributionQueryRestore);
-    if (options.restoreSeq !== undefined && !this.isCurrentRouteRestore(options.restoreSeq)) return;
+    if (options.restoreSeq !== undefined && !this.isCurrentRouteRestore(options.restoreSeq, options.navigation)) return;
     if (options.urlPublication === "current-url"
       && (options.updateUrl || selectionChanged || normalizeUnavailableRoute)
       && (options.requestedRoute === undefined
@@ -738,8 +760,54 @@ export class PiWebApp extends LitElement {
       : {};
   }
 
-  private isCurrentRouteRestore(restoreSeq: number): boolean {
-    return restoreSeq === this.routeRestoreSeq;
+  private isCurrentRouteRestore(restoreSeq: number, navigation?: NavigationFreshness): boolean {
+    return restoreSeq === this.routeRestoreSeq && (navigation === undefined || navigation.isCurrent());
+  }
+
+  /**
+   * Capture the coordinator-owned generation for only the route fields an
+   * asynchronous operation can apply. A surface-only URL change therefore
+   * does not retire a background selection operation, while a route restore
+   * that owns both selection and view state is retired by either change.
+   */
+  private beginNavigationOperation(scope: readonly NavigationScope[]): NavigationFreshness {
+    this.syncNavigationFreshness();
+    const operation: NavigationFreshness = {
+      generation: this.navigationGeneration,
+      scope: Object.freeze([...scope]),
+      isCurrent: () => this.isNavigationFresh(operation),
+    };
+    return operation;
+  }
+
+  private isNavigationFresh(operation: NavigationFreshness): boolean {
+    this.syncNavigationFreshness();
+    return operation.scope.every((field) => this.navigationFieldGenerations[field] <= operation.generation);
+  }
+
+  private syncNavigationFreshness(): void {
+    const route = readRoute();
+    const previous = this.observedNavigationRoute;
+    if (previous !== undefined) {
+      const changedFields = NAVIGATION_SCOPES.filter((field) => navigationRouteValue(previous, field) !== navigationRouteValue(route, field));
+      if (changedFields.length > 0) {
+        const generation = ++this.navigationGeneration;
+        for (const field of changedFields) this.navigationFieldGenerations[field] = generation;
+      }
+    }
+    this.observedNavigationRoute = route;
+  }
+
+  private retireNavigationScope(scope: readonly NavigationScope[]): void {
+    this.syncNavigationFreshness();
+    if (scope.length === 0) return;
+    const generation = ++this.navigationGeneration;
+    for (const field of scope) this.navigationFieldGenerations[field] = generation;
+  }
+
+  private retireRouteRestoreForSynchronousNavigation(): void {
+    this.retireNavigationScope(WORKSPACE_SURFACE_SCOPE);
+    this.routeRestoreSeq += 1;
   }
 
   private readWorkspaceRouteSurface(route: ParsedAppRoute): WorkspaceRouteSurface {
@@ -757,8 +825,10 @@ export class PiWebApp extends LitElement {
   }
 
   private replaceRouteAndClearWorkspaceQuery(route: ParsedAppRoute): void {
+    this.syncNavigationFreshness();
     writeRoute(route, { replace: true });
     writeContributionQueryRecord({}, { replace: true });
+    this.syncNavigationFreshness();
   }
 
   private shouldDeferRemoteRouteRestore(route: ParsedAppRoute, routeMachineHealth = this.state.machineStatuses[route.machineId ?? "local"]): boolean {
@@ -953,9 +1023,11 @@ export class PiWebApp extends LitElement {
    * applying its corresponding UI state.
    */
   private commitMachineNavigationSnapshot(snapshot: MachineNavigationSnapshot, options?: { replace?: boolean | undefined }): void {
+    this.syncNavigationFreshness();
     this.machineNavigation.remember(snapshot);
     writeRoute(routeFromMachineNavigationSnapshot(snapshot), options);
     this.writeWorkspaceRouteSurfaceToUrl(snapshot.surface);
+    this.syncNavigationFreshness();
   }
 
   private rememberCurrentMachineNavigation(): void {
@@ -977,11 +1049,13 @@ export class PiWebApp extends LitElement {
   }
 
   private replaceMachineNavigationSnapshot(snapshot: MachineNavigationSnapshot): void {
+    this.syncNavigationFreshness();
     this.machineNavigation.remember(snapshot);
     const route = routeFromMachineNavigationSnapshot(snapshot);
     const routeMatches = this.navigationRouteMatchesUrl(route);
     if (!this.navigationSurfaceMatchesUrl(snapshot.surface)) this.writeWorkspaceRouteSurfaceToUrl(snapshot.surface);
     if (!routeMatches) writeRoute(route, { replace: true });
+    this.syncNavigationFreshness();
   }
 
   private navigationRouteMatchesUrl(route: AppRoute): boolean {
@@ -1071,8 +1145,8 @@ export class PiWebApp extends LitElement {
     return this.selectMachineWithMemory(machine, options);
   }
 
-  private async selectProjectFromNavigation(project: Project): Promise<void> {
-    await this.navigateToProjectFromController(project);
+  private selectProjectFromNavigation(project: Project): Promise<boolean> {
+    return this.navigateToProjectFromController(project);
   }
 
   private async navigateToProjectFromController(project: Project | undefined, options: NavigationDestinationOptions = {}): Promise<boolean> {
@@ -1085,8 +1159,8 @@ export class PiWebApp extends LitElement {
     return true;
   }
 
-  private async selectWorkspaceFromNavigation(workspace: Workspace): Promise<void> {
-    await this.navigateToWorkspaceFromController(workspace);
+  private selectWorkspaceFromNavigation(workspace: Workspace): Promise<boolean> {
+    return this.navigateToWorkspaceFromController(workspace);
   }
 
   private async navigateToWorkspaceFromController(workspace: Workspace | undefined, options: NavigationDestinationOptions = {}): Promise<boolean> {
@@ -1099,8 +1173,8 @@ export class PiWebApp extends LitElement {
     return true;
   }
 
-  private async selectSessionFromNavigation(session: SessionInfo): Promise<void> {
-    await this.navigateToSessionFromController(session);
+  private selectSessionFromNavigation(session: SessionInfo): Promise<boolean> {
+    return this.navigateToSessionFromController(session);
   }
 
   private async navigateToSessionFromController(session: SessionInfo | undefined, options: NavigationDestinationOptions = {}): Promise<boolean> {
@@ -1127,6 +1201,7 @@ export class PiWebApp extends LitElement {
     if (availableTool === "core:workspace.terminal") this.terminalAutoStartWorkspaceId = this.state.selectedWorkspace?.id;
     const currentSnapshot = machineNavigationSnapshotFromState(this.state, this.currentContributionQueryForState());
     this.commitMachineNavigationSnapshot({ ...currentSnapshot, tool: availableTool, view: availableTool });
+    this.retireRouteRestoreForSynchronousNavigation();
     this.setState({ workspaceTool: availableTool, mainView: availableTool });
     this.refreshSelectedWorkspaceTool(availableTool);
   }
@@ -1221,6 +1296,7 @@ export class PiWebApp extends LitElement {
     if (options.invalidateNavigationSelection !== false) this.invalidateNavigationSelection();
     const currentSnapshot = machineNavigationSnapshotFromState(this.state, this.currentContributionQueryForState());
     this.commitMachineNavigationSnapshot({ ...currentSnapshot, view });
+    this.retireRouteRestoreForSynchronousNavigation();
     this.setState({ mainView: view });
   }
 
@@ -1559,7 +1635,7 @@ export class PiWebApp extends LitElement {
         .machineStatusSnapshots=${this.state.machineStatusSnapshots}
         .machinesCollapsed=${this.navigationSections.isCollapsed("machines")}
         .onToggleMachines=${() => { this.navigationSections.toggle("machines"); }}
-        .onSelectMachine=${(machine: Machine) => this.selectNavigationItem("machines", "projects", async () => { await this.selectMachineWithMemory(machine); })}
+        .onSelectMachine=${(machine: Machine) => this.selectNavigationItem("machines", "projects", () => this.selectMachineWithMemory(machine))}
         .onRemoveMachine=${(machine: Machine) => { void this.removeMachine(machine); }}
         .projects=${this.state.projects}
         .selectedProject=${this.state.selectedProject}
@@ -1597,7 +1673,7 @@ export class PiWebApp extends LitElement {
         .onArchiveSession=${(session: SessionInfo) => this.sessions.archiveSession(session)}
         .onArchiveSessionWithDescendants=${(session: SessionInfo) => this.sessions.archiveSessionWithDescendants(session)}
         .onArchiveSessions=${(sessions: SessionInfo[]) => this.sessions.archiveSessions(sessions)}
-        .onRestoreSession=${(session: SessionInfo) => this.selectNavigationItem("sessions", "chat", () => this.sessions.restoreSession(session))}
+        .onRestoreSession=${(session: SessionInfo) => this.selectNavigationItem("sessions", "chat", async () => { await this.sessions.restoreSession(session); return undefined; })}
         .onDeleteCachedNewSession=${(session: SessionInfo) => this.sessions.deleteCachedNewSession(session)}
         .onDeleteArchivedSession=${(session: SessionInfo) => this.sessions.deleteArchivedSessions([session])}
         .onDeleteArchivedSessions=${(sessions: SessionInfo[]) => this.sessions.deleteArchivedSessions(sessions)}
@@ -1614,16 +1690,17 @@ export class PiWebApp extends LitElement {
     this.navigationSections.open(section, () => { this.selectMainView("navigation"); });
   }
 
-  private async selectNavigationItem(section: NavigationSection, nextTarget: NavigationFocusTarget, action: () => Promise<void>): Promise<void> {
+  private async selectNavigationItem(section: NavigationSection, nextTarget: NavigationFocusTarget, action: () => Promise<boolean | undefined>): Promise<void> {
     const seq = ++this.navigationSelectionSeq;
     const isCurrentSelection = () => seq === this.navigationSelectionSeq;
+    let navigationAccepted: boolean | undefined;
 
     await this.withChatScrollTransition(async () => {
       this.navigationSections.advanceAfterSelection(section);
-      await action();
+      navigationAccepted = await action();
     }, isCurrentSelection);
 
-    if (!isCurrentSelection()) return;
+    if (!isCurrentSelection() || navigationAccepted === false) return;
     await this.focusNavigationTarget(nextTarget, isCurrentSelection);
   }
 
@@ -2887,6 +2964,18 @@ function sameWorkspaceRouteIdentity(left: WorkspaceRouteIdentity, right: Workspa
   return left.machineId === right.machineId
     && left.projectId === right.projectId
     && left.workspaceId === right.workspaceId;
+}
+
+function navigationRouteValue(route: ParsedAppRoute, scope: NavigationScope): string | undefined {
+  switch (scope) {
+    case "machine": return route.machineId ?? "local";
+    case "project": return route.projectId;
+    case "workspace": return route.workspaceId;
+    case "session": return route.sessionId;
+    case "tool": return route.tool;
+    case "view": return route.view;
+    default: return undefined;
+  }
 }
 
 function remoteRouteRestoreRetryDelay(attempt: number): number {

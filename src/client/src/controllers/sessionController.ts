@@ -15,7 +15,7 @@ import { isArchivableSessionInfo, isTransientNewSessionInfo } from "../sessionPe
 import { isSessionActive } from "../../../shared/activity";
 import type { PromptAttachmentDelivery, SessionNotificationInboxEvent, SessionStartupProgressEvent } from "../../../shared/apiTypes";
 import { InMemorySessionSelectionMemory, markSessionArchived, markSessionsArchived, selectPreferredSession, selectionAfterArchivingSession, selectionAfterArchivingSessions, shouldDeselectAfterArchivedCollapse, type SessionSelectionMemory } from "./sessionSelection";
-import { selectedMachineId, type GetState, type NavigationDestinationOptions, type NavigationSelection, type SetState, type UpdateUrl } from "./types";
+import { selectedMachineId, type GetState, type NavigationDestinationOptions, type NavigationFreshness, type NavigationSelection, type SetState, type UpdateUrl } from "./types";
 import { TrailingRefreshCoordinator } from "./trailingRefreshCoordinator";
 
 const MESSAGE_PAGE_SIZE = 100;
@@ -105,6 +105,14 @@ interface SelectedSessionRefreshTarget {
   session: SessionInfo;
   machineId: string;
   selectionSeq: number;
+  navigation?: NavigationFreshness | undefined;
+}
+
+export interface SessionSelectionOptions {
+  updateUrl?: boolean | undefined;
+  preserveTreeDialog?: boolean | undefined;
+  propagateRefreshError?: boolean | undefined;
+  navigation?: NavigationFreshness | undefined;
 }
 
 export class SessionController {
@@ -249,8 +257,8 @@ export class SessionController {
     return selectPreferredSession(sessions, { targetSessionId, latestSessionId: this.sessionSelection.latestSessionId(this.workspaceSelectionKey(cwd)) });
   }
 
-  async selectSession(session: SessionInfo, options?: { updateUrl?: boolean | undefined; preserveTreeDialog?: boolean | undefined; propagateRefreshError?: boolean | undefined }) {
-    if (this.disposed) return;
+  async selectSession(session: SessionInfo, options?: SessionSelectionOptions) {
+    if (this.disposed || !navigationIsCurrent(options?.navigation)) return;
     if (isClientPendingStartSessionInfo(session)) {
       this.selectClientPendingStartSession(session, options);
       return;
@@ -280,7 +288,7 @@ export class SessionController {
     try {
       if (session.archived === true) {
         const page = await this.api.messages(session, { limit: MESSAGE_PAGE_SIZE }, selectedMachineId(this.getState()));
-        if (seq !== this.selectionSeq || this.getState().selectedSession?.id !== session.id) return;
+        if (seq !== this.selectionSeq || this.getState().selectedSession?.id !== session.id || !navigationIsCurrent(options?.navigation)) return;
         const history = this.transcripts.mergeHistory(transcriptKey, page);
         this.setState({ ...history, isLoadingEarlierMessages: false, status: undefined, activity: undefined, pendingAsk: undefined, pendingDialogs: [], closedDialogs: [] });
         this.onSelectedSessionReady?.({ machineId, session });
@@ -296,18 +304,21 @@ export class SessionController {
         machineId,
         () => { void this.notifications?.refreshSelectedSession(session, machineId); },
       );
-      await this.requestSelectedSessionRefresh({ session, machineId, selectionSeq: seq });
-      if (!this.isCurrentRefreshTarget({ session, machineId, selectionSeq: seq })) return;
+      await this.requestSelectedSessionRefresh({ session, machineId, selectionSeq: seq, ...(options?.navigation === undefined ? {} : { navigation: options.navigation }) });
+      if (!this.isCurrentRefreshTarget({ session, machineId, selectionSeq: seq }) || !navigationIsCurrent(options?.navigation)) return;
       void this.refreshAvailableThinkingLevels();
       for (const event of socketBuffer) this.applyEvent(event);
       this.socket.setHandler((event) => { this.applyEvent(event); });
       this.onSelectedSessionReady?.({ machineId, session });
       if (options?.updateUrl !== false) this.updateUrl();
     } catch (error) {
-      if (seq !== this.selectionSeq || this.getState().selectedSession?.id !== session.id) {
+      const navigationCurrent = navigationIsCurrent(options?.navigation);
+      if (!navigationCurrent
+        || seq !== this.selectionSeq
+        || this.getState().selectedSession?.id !== session.id) {
         // Tree navigation still needs to know when a same-session reselection's
         // shared trailing refresh failed, even though this selection is stale.
-        if (options?.propagateRefreshError === true && this.isSelectedSessionIdentity(session.id, machineId)) throw error;
+        if (options?.propagateRefreshError === true && navigationCurrent && this.isSelectedSessionIdentity(session.id, machineId)) throw error;
         return;
       }
       if (isCachedNewSessionInfo(session) && isSessionNotFoundError(error)) {
@@ -1201,7 +1212,8 @@ export class SessionController {
   }
 
   private isCurrentRefreshTarget(target: SelectedSessionRefreshTarget): boolean {
-    return this.isCurrentSessionSelection(target.session.id, target.machineId, target.selectionSeq);
+    return this.isCurrentSessionSelection(target.session.id, target.machineId, target.selectionSeq)
+      && navigationIsCurrent(target.navigation);
   }
 
   private isCurrentSessionSelection(sessionId: string, machineId: string, selectionSeq: number): boolean {
@@ -1915,6 +1927,10 @@ function replacePendingSessionInList(sessions: readonly SessionInfo[], pendingSe
   }
   if (!inserted) return [resolvedSession, ...next];
   return next;
+}
+
+function navigationIsCurrent(navigation: NavigationFreshness | undefined): boolean {
+  return navigation === undefined || navigation.isCurrent();
 }
 
 function isClientPendingStartSessionInfo(session: SessionInfo | undefined): session is ClientPendingStartSessionInfo {

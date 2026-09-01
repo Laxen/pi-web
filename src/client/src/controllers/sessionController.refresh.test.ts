@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { initialAppState } from "../appState";
 import { ChatTranscriptStore } from "../chatTranscriptStore";
 import { SessionController } from "./sessionController";
-import { defaultApi, deferred, FakeSocket, oldSession, replacementSession, sessionLookupId, status, workspace, type AppState, type MessagePage, type SessionStatus, type SessionStreamSnapshot } from "./sessionController.testSupport";
+import type { NavigationFreshness } from "./types";
+import { defaultApi, deferred, emptyPage, FakeSocket, oldSession, replacementSession, sessionLookupId, status, workspace, type AppState, type MessagePage, type SessionStatus, type SessionStreamSnapshot } from "./sessionController.testSupport";
 
 function page(text: string, total: number): MessagePage {
   return { messages: [{ role: "assistant", content: text }], start: 0, total };
@@ -42,6 +43,43 @@ describe("SessionController selected-session refresh", () => {
     await selecting;
 
     expect(ready).toEqual([`local:${oldSession.id}`]);
+  });
+
+  it("does not apply a selected-session response after its route scope becomes stale", async () => {
+    const messages = deferred<MessagePage>();
+    const selectedStatus = deferred<SessionStatus>();
+    let navigationCurrent = true;
+    const navigation: NavigationFreshness = {
+      generation: 0,
+      scope: ["session"],
+      isCurrent: () => navigationCurrent,
+    };
+    let state: AppState = { ...initialAppState(), selectedWorkspace: workspace, sessions: [oldSession] };
+    const api: typeof defaultApi = {
+      ...defaultApi,
+      messages: () => messages.promise,
+      status: () => selectedStatus.promise,
+      streamSnapshot: () => Promise.resolve({ seq: 0, partial: null }),
+      thinkingLevels: () => Promise.resolve({ levels: [] }),
+    };
+    const controller = new SessionController(
+      () => state,
+      (patch) => { state = { ...state, ...patch }; },
+      () => undefined,
+      undefined,
+      { api, socket: new FakeSocket() },
+    );
+
+    const selecting = controller.selectSession(oldSession, { updateUrl: false, navigation });
+    await Promise.resolve();
+    navigationCurrent = false;
+    messages.resolve(emptyPage);
+    selectedStatus.resolve(status(oldSession.id));
+    await selecting;
+
+    expect(state.selectedSession?.id).toBe(oldSession.id);
+    expect(state.messages).toEqual([]);
+    expect(state.status).toBeUndefined();
   });
 
   it("shares same-turn requests and runs one trailing refresh requested during the active fetch", async () => {
