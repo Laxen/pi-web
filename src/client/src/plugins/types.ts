@@ -3,6 +3,7 @@ import type { AppAction } from "../actions";
 import type { DeleteWorkspaceFileResponse, FileContentResponse, FileTreeResponse, JsonValue, Machine, MoveWorkspaceFileOptions, MoveWorkspaceFileResponse, RunTerminalCommandInput, TerminalCommandRun, TerminalCommandRunFilter, TerminalCommandRunHandle, WriteWorkspaceFileOptions, WriteWorkspaceFileResponse, Workspace } from "../api";
 import type { AppState } from "../appState";
 import type { SettingsSection } from "../settingsRoute";
+import type { NavigationFreshness } from "../controllers/types";
 import type { LocalContributionId, PluginId, QualifiedContributionId } from "./ids";
 
 export type { LocalContributionId, PluginId, QualifiedContributionId } from "./ids";
@@ -141,10 +142,10 @@ export interface PiWebUnstableRuntimeContext {
 }
 
 export interface TerminalCommandRunsInternalRuntime {
-  runCommand(input: RunTerminalCommandInput): Promise<TerminalCommandRunHandle>;
+  runCommand(input: RunTerminalCommandInput, navigation?: NavigationFreshness): Promise<TerminalCommandRunHandle>;
   listCommandRuns(filter?: TerminalCommandRunFilter): Promise<TerminalCommandRun[]>;
   getCommandRun(runId: string): Promise<TerminalCommandRun | undefined>;
-  open(options?: { terminalId?: string | undefined }): void;
+  open(options?: { terminalId?: string | undefined }, navigation?: NavigationFreshness): void;
 }
 
 export interface PluginPromptEditor {

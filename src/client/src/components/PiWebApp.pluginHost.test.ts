@@ -877,6 +877,12 @@ describe("PiWebApp plugin host", () => {
     expect(navigation?.query).toEqual({ file: "back.ts" });
     expect(firstSnapshot?.query).toEqual({ file: "canonical.ts", mode: "preview" });
 
+    const writesBeforeStaleSurfaceSet = browser.pushed.length;
+    browser.navigate("http://localhost/app?machine=remote-1&project=project-1&workspace=workspace-1&view=chat&browser-only.workspace.panel--file=back.ts");
+    firstSnapshot?.set("mode", "surface-stale");
+    expect(browser.pushed).toHaveLength(writesBeforeStaleSurfaceSet);
+    expect(browser.url.searchParams.has("browser-only.workspace.panel--mode")).toBe(false);
+
     browser.navigate("http://localhost/app?machine=other&project=project-1&workspace=workspace-1&browser-only.workspace.panel--file=other.ts");
     panel?.render(workspacePanelContextFromApp(app));
     expect(navigation?.query).toEqual({});
@@ -921,6 +927,95 @@ describe("PiWebApp plugin host", () => {
     expect(browser.url.searchParams.get("project")).toBe(nextProject.id);
     expect(browser.url.searchParams.get("workspace")).toBe(nextWorkspace.id);
     expect(appState(app).selectedTerminalId).toBeUndefined();
+  });
+
+  it("rejects retained terminal callbacks after same-workspace surface navigation", async () => {
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.terminal&view=core%3Aworkspace.terminal");
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceTool: "core:workspace.terminal",
+      mainView: "core:workspace.terminal",
+    });
+    const openTerminal = vi.fn();
+    if (!Reflect.set(app, "openTerminal", openTerminal)) throw new Error("Could not stub terminal opening");
+    const staleContext = workspacePanelContextFromApp(app);
+
+    browser.navigate("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.terminal&view=chat");
+    setAppState(app, { ...appState(app), mainView: "chat" });
+
+    staleContext.terminal.open({ terminalId: "stale-terminal" });
+    const legacyOpenTerminal: unknown = Reflect.get(staleContext, "openTerminal");
+    if (typeof legacyOpenTerminal !== "function") throw new Error("Deprecated terminal opening alias was unavailable");
+    Reflect.apply(legacyOpenTerminal, staleContext, [{ terminalId: "stale-terminal" }]);
+    staleContext.onSelectTerminal("stale-terminal");
+    staleContext.piWebUnstable?.terminalCommandRuns.open({ terminalId: "stale-terminal" });
+    const command = staleContext.terminal.runCommand({ title: "Stale command", command: "echo stale", open: true });
+    const unstableCommand = staleContext.piWebUnstable?.terminalCommandRuns.runCommand({ workspace, title: "Stale command", command: "echo stale", open: true });
+
+    await expect(command).rejects.toThrow("Workspace panel context is no longer current");
+    if (unstableCommand !== undefined) await expect(unstableCommand).rejects.toThrow("Workspace panel context is no longer current");
+    expect(openTerminal).not.toHaveBeenCalled();
+    expect(browser.pushed).toHaveLength(0);
+    expect(browser.replaced).toHaveLength(0);
+    expect(browser.url.searchParams.get("view")).toBe("chat");
+    expect(appState(app).selectedTerminalId).toBeUndefined();
+  });
+
+  it("keeps retained terminal callbacks valid across unrelated workspace query changes", async () => {
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.terminal&view=core%3Aworkspace.terminal&browser-only.workspace.panel--file=old.ts");
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceTool: "core:workspace.terminal",
+      mainView: "core:workspace.terminal",
+    });
+    const openTerminal = vi.fn();
+    if (!Reflect.set(app, "openTerminal", openTerminal)) throw new Error("Could not stub terminal opening");
+    const context = workspacePanelContextFromApp(app);
+
+    browser.navigate("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.terminal&view=core%3Aworkspace.terminal&browser-only.workspace.panel--file=new.ts");
+    context.terminal.open({ terminalId: "current-terminal" });
+    context.piWebUnstable?.terminalCommandRuns.open({ terminalId: "current-terminal-2" });
+    await Promise.resolve();
+
+    expect(openTerminal).toHaveBeenNthCalledWith(1, { terminalId: "current-terminal" });
+    expect(openTerminal).toHaveBeenNthCalledWith(2, { terminalId: "current-terminal-2" });
+  });
+
+  it("keeps workspace refresh completion independent of panel surface freshness", async () => {
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.terminal&view=core%3Aworkspace.terminal");
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceTool: "core:workspace.terminal",
+      mainView: "core:workspace.terminal",
+    });
+    let resolveRefresh: (() => void) | undefined;
+    const refreshCompletion = new Promise<void>((resolve) => { resolveRefresh = resolve; });
+    const invalidated = vi.fn<(context: WorkspacePanelContext, invalidation?: WorkspaceInvalidation) => Promise<void>>(() => refreshCompletion);
+    appPluginRegistry(app).register({ id: "browser-only", plugin: pluginWithPanel("Browser only", invalidated) });
+
+    const refreshing: unknown = callAppMethod(app, "invalidateWorkspaceResources", workspace, { id: "local", name: "local", kind: "local" }, {
+      reason: "manual",
+      resources: ["workspace.files"],
+    });
+    if (!(refreshing instanceof Promise)) throw new Error("Workspace refresh did not return a promise");
+    await vi.waitFor(() => { expect(invalidated).toHaveBeenCalledOnce(); });
+    browser.navigate("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.terminal&view=chat");
+    resolveRefresh?.();
+    await refreshing;
+
+    expect(invalidated).toHaveBeenCalledOnce();
   });
 
   it("restores Files legacy routes and query-only history through the real runtime invalidation path", async () => {
@@ -1693,7 +1788,7 @@ function stubPluginLoadRendering(app: PiWebApp): void {
   if (!Reflect.set(app, "requestUpdate", () => undefined)) throw new Error("Could not stub Lit update scheduling");
 }
 
-function pluginWithPanel(name: string, onInvalidate: (context: WorkspacePanelContext, invalidation?: WorkspaceInvalidation) => void): PiWebPlugin {
+function pluginWithPanel(name: string, onInvalidate: (context: WorkspacePanelContext, invalidation?: WorkspaceInvalidation) => void | Promise<void>): PiWebPlugin {
   return {
     apiVersion: 2,
     name,

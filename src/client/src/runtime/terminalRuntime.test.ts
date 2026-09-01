@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RunTerminalCommandInput, TerminalCommandRun, TerminalCommandRunFilter, Workspace } from "../api";
+import type { NavigationFreshness } from "../controllers/types";
 import { createTerminalCommandRunsRuntime } from "./terminalRuntime";
 
 const workspace: Workspace = {
@@ -71,6 +72,40 @@ describe("terminal runtime", () => {
 
     expect(captureNavigation).toHaveBeenCalledOnce();
     expect(openTerminal).toHaveBeenCalledWith(workspace, { terminalId: "t1" }, expected);
+  });
+
+  it("does not open a terminal after its scoped navigation expires during command completion", async () => {
+    let resolveRun: ((run: TerminalCommandRun) => void) | undefined;
+    const runCompletion = new Promise<TerminalCommandRun>((resolve) => { resolveRun = resolve; });
+    let current = true;
+    const navigation: NavigationFreshness = {
+      generation: 1,
+      scope: ["tool", "view"],
+      isCurrent: () => current,
+    };
+    const openTerminal = vi.fn();
+    const captureNavigation = vi.fn((captured?: NavigationFreshness) => ({
+      selection: { machineId: "local", projectId: workspace.projectId, workspaceId: workspace.id },
+      tool: "core:workspace.terminal",
+      view: "core:workspace.terminal",
+      url: "http://localhost/app?project=p1&workspace=w1&view=core%3Aworkspace.terminal",
+      ...(captured === undefined ? {} : { navigation: captured }),
+    }));
+    const api = {
+      runTerminalCommand: vi.fn(() => runCompletion),
+      listCommandRuns: vi.fn(),
+      getCommandRun: vi.fn(),
+    };
+    const runtime = createTerminalCommandRunsRuntime("actions", { api, captureNavigation, openTerminal });
+
+    const command = runtime.runCommand({ workspace, title: "Build", command: "npm run build", open: true }, navigation);
+    current = false;
+    if (resolveRun === undefined) throw new Error("Terminal command completion was not initialized");
+    resolveRun(succeededRun);
+    await command;
+
+    expect(captureNavigation).toHaveBeenCalledWith(navigation);
+    expect(openTerminal).not.toHaveBeenCalled();
   });
 
   it("passes through command-run lookup helpers and open requests", async () => {

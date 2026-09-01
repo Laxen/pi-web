@@ -1101,7 +1101,8 @@ export class PiWebApp extends LitElement {
 
   private terminalNavigationContextMatchesUrl(expected: TerminalCommandNavigationContext): boolean {
     const current = readRoute();
-    return currentBrowserUrl() === expected.url
+    return (expected.navigation === undefined || expected.navigation.isCurrent())
+      && currentBrowserUrl() === expected.url
       && this.navigationSelectionMatchesUrl(expected.selection)
       && current.tool === expected.tool
       && current.view === expected.view;
@@ -1222,7 +1223,7 @@ export class PiWebApp extends LitElement {
         listCommandRuns: (filter) => terminalsApi.listCommandRuns(filter, machineId),
         getCommandRun: (runId) => terminalsApi.getCommandRun(runId, machineId),
       },
-      captureNavigation: () => terminalNavigationContextFromState(this.state),
+      captureNavigation: (navigation) => terminalNavigationContextFromState(this.state, navigation),
       openTerminal: (workspace, options, expected) => { void this.openRuntimeTerminal(machineId, workspace, { ...options, expected }); },
     });
     this.terminalCommandRunRuntimes.set(key, runtime);
@@ -1261,6 +1262,7 @@ export class PiWebApp extends LitElement {
       }
     }
     if (navigationSeq !== this.runtimeTerminalNavigationSeq) return;
+    if (options?.expected !== undefined && !this.terminalNavigationContextMatchesUrl(options.expected)) return;
     this.openTerminal(options?.terminalId === undefined ? undefined : { terminalId: options.terminalId });
   }
 
@@ -1939,8 +1941,11 @@ export class PiWebApp extends LitElement {
       contributionId?: QualifiedContributionId,
       navigationAliases: readonly QualifiedContributionId[] = [],
     ): WorkspacePanelContext => {
+      // Retained panel contexts may outlive the visible surface. Terminal and
+      // navigation mutations use this token; workspace data refreshes do not.
+      const navigation = this.beginNavigationOperation(WORKSPACE_SURFACE_SCOPE);
       const terminalCommandRuns = this.terminalCommandRunsForOrigin(binding.registrationPluginId, machineId);
-      const scopedTerminalCommandRuns = this.createWorkspaceTerminalCommandRuns(terminalCommandRuns, workspace, machine);
+      const scopedTerminalCommandRuns = this.createWorkspaceTerminalCommandRuns(terminalCommandRuns, workspace, machine, navigation);
       const backend = createPluginWorkspaceBackend(binding, workspace, machineId);
       return installWorkspacePanelScope({
         machine,
@@ -1951,17 +1956,17 @@ export class PiWebApp extends LitElement {
         prompt: this.createPromptEditor(),
         terminal: {
           open: (options) => {
-            if (!this.workspacePanelContextIsCurrent(workspace, machine)) return;
-            void this.openRuntimeTerminal(machineId, workspace, { ...options, expected: terminalNavigationContextFromState(this.state) });
+            if (!this.workspacePanelContextIsCurrent(workspace, machine, navigation)) return;
+            void this.openRuntimeTerminal(machineId, workspace, { ...options, expected: terminalNavigationContextFromState(this.state, navigation) });
           },
           runCommand: (input) => scopedTerminalCommandRuns.runCommand({ ...input, workspace }),
         },
         ...(contributionId === undefined ? {} : {
-          navigation: this.createWorkspacePanelNavigation(workspace, machine, contributionId, navigationAliases, contributionQueryRestore),
+          navigation: this.createWorkspacePanelNavigation(workspace, machine, contributionId, navigationAliases, contributionQueryRestore, navigation),
         }),
         openTerminal: (options) => {
-          if (!this.workspacePanelContextIsCurrent(workspace, machine)) return;
-          void this.openRuntimeTerminal(machineId, workspace, { ...options, expected: terminalNavigationContextFromState(this.state) });
+          if (!this.workspacePanelContextIsCurrent(workspace, machine, navigation)) return;
+          void this.openRuntimeTerminal(machineId, workspace, { ...options, expected: terminalNavigationContextFromState(this.state, navigation) });
         },
         host: this.createWorkspaceHost(),
         piWebUnstable: { terminalCommandRuns: scopedTerminalCommandRuns },
@@ -1969,7 +1974,7 @@ export class PiWebApp extends LitElement {
         selectedTerminalId: this.state.selectedTerminalId,
         terminalAutoStart: this.terminalAutoStartWorkspaceId === workspace.id,
         onSelectTerminal: (terminalId: string | undefined, options?: { replace?: boolean | undefined }) => {
-          if (!this.workspacePanelContextIsCurrent(workspace, machine)) return;
+          if (!this.workspacePanelContextIsCurrent(workspace, machine, navigation)) return;
           this.selectTerminal(terminalId, options);
         },
       }, createContext);
@@ -1981,26 +1986,31 @@ export class PiWebApp extends LitElement {
     terminalCommandRuns: TerminalCommandRunsInternalRuntime,
     workspace: Workspace,
     machine: PluginMachine,
+    navigation: NavigationFreshness,
   ): TerminalCommandRunsInternalRuntime {
     return {
       runCommand: (input) => {
-        if (!this.workspacePanelContextIsCurrent(workspace, machine)
+        // A command can remain a valid workspace operation after a view change,
+        // but an optional terminal open must stay bound to its panel surface.
+        const contextIsCurrent = this.workspacePanelContextIsCurrent(workspace, machine);
+        if (!contextIsCurrent
+          || (input.open === true && !navigation.isCurrent())
           || input.workspace.id !== workspace.id
           || input.workspace.projectId !== workspace.projectId) {
           return Promise.reject(new Error("Workspace panel context is no longer current"));
         }
-        return terminalCommandRuns.runCommand(input);
+        return terminalCommandRuns.runCommand(input, navigation);
       },
       listCommandRuns: (filter) => terminalCommandRuns.listCommandRuns(filter),
       getCommandRun: (runId) => terminalCommandRuns.getCommandRun(runId),
       open: (options) => {
-        if (!this.workspacePanelContextIsCurrent(workspace, machine)) return;
-        terminalCommandRuns.open(options);
+        if (!this.workspacePanelContextIsCurrent(workspace, machine, navigation)) return;
+        terminalCommandRuns.open(options, navigation);
       },
     };
   }
 
-  private workspacePanelContextIsCurrent(workspace: Workspace, machine: PluginMachine): boolean {
+  private workspacePanelContextIsCurrent(workspace: Workspace, machine: PluginMachine, navigation?: NavigationFreshness): boolean {
     return selectedMachineId(this.state) === machine.id
       && this.state.selectedProject?.id === workspace.projectId
       && this.state.selectedWorkspace?.id === workspace.id
@@ -2008,7 +2018,8 @@ export class PiWebApp extends LitElement {
         machineId: machine.id,
         projectId: workspace.projectId,
         workspaceId: workspace.id,
-      });
+      })
+      && (navigation === undefined || navigation.isCurrent());
   }
 
   private createWorkspacePanelNavigation(
@@ -2016,7 +2027,8 @@ export class PiWebApp extends LitElement {
     machine: PluginMachine,
     contributionId: QualifiedContributionId,
     navigationAliases: readonly QualifiedContributionId[],
-    contributionQueryRestore?: WorkspaceContributionQueryRestore,
+    contributionQueryRestore: WorkspaceContributionQueryRestore | undefined,
+    navigation: NavigationFreshness,
   ): WorkspacePanelNavigationV1 {
     const identity: WorkspaceRouteIdentity = { machineId: machine.id, projectId: workspace.projectId, workspaceId: workspace.id };
     const query = contributionQueryRestore !== undefined && sameWorkspaceRouteIdentity(identity, contributionQueryRestore.identity)
@@ -2030,6 +2042,7 @@ export class PiWebApp extends LitElement {
       query,
       set: (key: string, value: ContributionQueryValue | undefined | null, options?: { replace?: boolean | undefined }) => {
         if (!isContributionQueryLocalKey(key)) throw new Error(`Invalid contribution navigation key: ${key}`);
+        if (!navigation.isCurrent()) return;
         const selectedIdentity = this.selectedWorkspaceRouteIdentity();
         if (selectedIdentity === undefined
           || !sameWorkspaceRouteIdentity(identity, selectedIdentity)
@@ -2877,9 +2890,18 @@ function navigationSelectionFromState(state: Pick<AppState, "selectedMachine" | 
   };
 }
 
-function terminalNavigationContextFromState(state: Pick<AppState, "selectedMachine" | "selectedProject" | "selectedWorkspace" | "selectedSession">): TerminalCommandNavigationContext {
+function terminalNavigationContextFromState(
+  state: Pick<AppState, "selectedMachine" | "selectedProject" | "selectedWorkspace" | "selectedSession">,
+  navigation?: NavigationFreshness,
+): TerminalCommandNavigationContext {
   const route = readRoute();
-  return { selection: navigationSelectionFromState(state), tool: route.tool, view: route.view, url: currentBrowserUrl() };
+  return {
+    selection: navigationSelectionFromState(state),
+    tool: route.tool,
+    view: route.view,
+    url: currentBrowserUrl(),
+    ...(navigation === undefined ? {} : { navigation }),
+  };
 }
 
 function currentBrowserUrl(): string {
