@@ -3,6 +3,7 @@ import type { ChatLine } from "./components/shared";
 import type { MachineStatusSnapshot } from "../../shared/machineStatus";
 import type { QualifiedContributionId } from "./plugins/ids";
 import type { SelectedSessionNotificationInbox } from "./sessionNotifications";
+import type { BrowserErrorMap } from "./browserErrors";
 
 export interface AppState {
   machines: Machine[];
@@ -72,9 +73,10 @@ export interface AppState {
   machineDialogOpen: boolean;
   workspaceTool: QualifiedContributionId | undefined;
   mainView: "navigation" | "chat" | QualifiedContributionId;
-  activeTerminalCount: number;
-  selectedTerminalId: string | undefined;
   piWebStatus: PiWebStatusResponse | undefined;
+  /** Browser-local failures retained by their machine/project/workspace/session owner. */
+  browserErrors: BrowserErrorMap;
+  /** Legacy global browser error surface for unmigrated global operations. */
   error: string;
 }
 
@@ -105,7 +107,6 @@ export type WorkspaceScopedStateReset = Pick<AppState,
   | "startingSessionCount"
   | "selectedNotificationInbox"
   | "treeDialog"
-  | "selectedTerminalId"
   | "error"
 >;
 
@@ -116,7 +117,6 @@ export function resetWorkspaceScopedState(): WorkspaceScopedStateReset {
     startingSessionCount: 0,
     selectedNotificationInbox: undefined,
     treeDialog: undefined,
-    selectedTerminalId: undefined,
     error: "",
   };
 }
@@ -167,9 +167,8 @@ export function initialAppState(): AppState {
     machineDialogOpen: false,
     workspaceTool: undefined,
     mainView: "chat",
-    activeTerminalCount: 0,
-    selectedTerminalId: undefined,
     piWebStatus: undefined,
+    browserErrors: {},
     error: "",
   };
 }

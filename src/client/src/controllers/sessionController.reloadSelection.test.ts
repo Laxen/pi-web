@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { initialAppState } from "../appState";
 import { ChatTranscriptStore } from "../chatTranscriptStore";
+import { browserErrorScopeKey, sessionBrowserErrorScope } from "../browserErrors";
 import type { NavigationFreshness } from "./types";
 import { SessionController } from "./sessionController";
 import { InMemorySessionSelectionMemory } from "./sessionSelection";
@@ -105,6 +106,50 @@ describe("SessionController reload and selection", () => {
     expect(state.selectedSession?.id).toBe(nextSession.id);
     expect(state.sessions).toEqual([nextSession]);
     expect(state.error).toBe("");
+  });
+
+  it("retains a stale restore failure under its originating session scope", async () => {
+    const archivedSession = { ...oldSession, archived: true, archivedAt: "later" };
+    const nextSession = { ...oldSession, id: "next-session", path: "/tmp/next-session.jsonl" };
+    const restoreRequest = deferred<{ restored: true }>();
+    let navigationCurrent = true;
+    let state: AppState = {
+      ...initialAppState(),
+      selectedWorkspace: workspace,
+      selectedSession: archivedSession,
+      sessions: [archivedSession],
+    };
+    const navigation: NavigationFreshness = {
+      generation: 1,
+      scope: ["machine", "project", "workspace", "session"],
+      isCurrent: () => navigationCurrent,
+    };
+    const controller = new SessionController(
+      () => state,
+      (patch) => { state = { ...state, ...patch }; },
+      () => undefined,
+      new InMemorySessionSelectionMemory(),
+      {
+        api: { ...defaultApi, restore: () => restoreRequest.promise },
+        socket: new FakeSocket(),
+        beginNavigationOperation: () => navigation,
+      },
+    );
+
+    const restoring = controller.restoreSession(archivedSession);
+    state = { ...state, selectedSession: nextSession, sessions: [nextSession] };
+    navigationCurrent = false;
+    restoreRequest.reject(new Error("origin restore unavailable"));
+    await restoring;
+
+    const scope = sessionBrowserErrorScope("local", archivedSession.id, {
+      cwd: archivedSession.cwd,
+      projectId: workspace.projectId,
+      workspaceId: workspace.id,
+    });
+    expect(state.browserErrors[browserErrorScopeKey(scope)]?.message).toBe("Error: origin restore unavailable");
+    expect(state.selectedSession).toBe(nextSession);
+    expect(state.sessions).toEqual([nextSession]);
   });
 
   it("reloads the selected session from disk, discards the cached transcript, and re-fetches history", async () => {

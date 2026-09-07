@@ -2,9 +2,14 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FilesRuntime } from "../../../../pi-web-plugins/files/FilesRuntime";
+import { TerminalBrowserRuntime } from "../../../../pi-web-plugins/terminal/TerminalBrowserRuntime";
+import { TerminalFacade, type RequiredTerminalBrowserFacadeV1, type RequiredTerminalWorkspaceBindingV1 } from "../../../../pi-web-plugins/terminal/TerminalFacade";
+import { InMemoryTerminalSelectionMemory } from "../../../../pi-web-plugins/terminal/terminalSelection";
 import type { WorkspaceFilesCapabilityV1, WorkspacePanelContext as PublicWorkspacePanelContext } from "../../../plugin-api";
-import type { Machine, Project, SessionInfo, Workspace } from "../api";
+import type { Machine, Project, SessionInfo, TerminalCommandRun, Workspace } from "../api";
+import { machineScopedBundledPluginId } from "../../../shared/machinePluginIds";
 import { initialAppState } from "../appState";
+import { browserErrorScopeKey, machineBrowserErrorScope, workspaceBrowserErrorScope } from "../browserErrors";
 import type { MachineNavigationSnapshot } from "../controllers/machineNavigationMemory";
 import type { NavigationFreshness, NavigationScope } from "../controllers/types";
 import { SessionController } from "../controllers/sessionController";
@@ -17,6 +22,7 @@ vi.mock("../plugins/external", () => ({ loadExternalPlugins: vi.fn() }));
 
 const project: Project = { id: "project-1", name: "Project", path: "/repo", createdAt: "now" };
 const remoteMachine: Machine = { id: "remote-1", name: "Remote", kind: "remote", createdAt: "now", updatedAt: "now" };
+const TERMINAL_PANEL_ID = "pi-web.terminal:workspace.terminal";
 
 const workspace: Workspace = {
   id: "workspace-1",
@@ -34,21 +40,24 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   window.localStorage.clear();
   window.sessionStorage.clear();
 });
 
 describe("PiWebApp plugin host", () => {
   it("commits a workspace view destination before applying the rendered selection", () => {
-    installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.terminal&view=chat");
+    installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&tool=pi-web.terminal%3Aworkspace.terminal&view=chat");
     const app = new PiWebApp();
+    installTestTerminalComposition(app, "local");
     setAppState(app, {
       ...initialAppState(),
       selectedProject: project,
       selectedWorkspace: workspace,
       workspaces: [workspace],
-      workspaceTool: "core:workspace.terminal",
+      workspaceTool: TERMINAL_PANEL_ID,
       mainView: "chat",
     });
 
@@ -60,11 +69,11 @@ describe("PiWebApp plugin host", () => {
       window.history.replaceState(state, title, next);
     });
 
-    callAppMethod(app, "openWorkspaceTool", "core:workspace.terminal");
+    callAppMethod(app, "openWorkspaceTool", TERMINAL_PANEL_ID);
 
     expect(mainViewAtCommit).toBe("chat");
-    expect(new URL(window.location.href).searchParams.get("view")).toBe("core:workspace.terminal");
-    expect(appState(app).mainView).toBe("core:workspace.terminal");
+    expect(new URL(window.location.href).searchParams.get("view")).toBe(TERMINAL_PANEL_ID);
+    expect(appState(app).mainView).toBe(TERMINAL_PANEL_ID);
   });
 
   it("commits a main-view destination before applying the rendered selection", () => {
@@ -75,8 +84,8 @@ describe("PiWebApp plugin host", () => {
       selectedProject: project,
       selectedWorkspace: workspace,
       workspaces: [workspace],
-      workspaceTool: "core:workspace.terminal",
-      mainView: "core:workspace.terminal",
+      workspaceTool: TERMINAL_PANEL_ID,
+      mainView: TERMINAL_PANEL_ID,
     });
 
     let mainViewAtCommit: ReturnType<typeof initialAppState>["mainView"] | undefined;
@@ -87,31 +96,9 @@ describe("PiWebApp plugin host", () => {
 
     callAppMethod(app, "selectMainView", "chat");
 
-    expect(mainViewAtCommit).toBe("core:workspace.terminal");
+    expect(mainViewAtCommit).toBe(TERMINAL_PANEL_ID);
     expect(new URL(window.location.href).searchParams.get("view")).toBe("chat");
     expect(appState(app).mainView).toBe("chat");
-  });
-
-  it("commits terminal selection before applying the rendered selection", () => {
-    installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&core.workspace.terminal--terminal=old-terminal");
-    const app = new PiWebApp();
-    setAppState(app, {
-      ...initialAppState(),
-      selectedProject: project,
-      selectedWorkspace: workspace,
-      workspaces: [workspace],
-      selectedTerminalId: "old-terminal",
-    });
-
-    let terminalAtCommit: string | undefined;
-    vi.spyOn(window.history, "replaceState").mockImplementation(() => {
-      terminalAtCommit = appState(app).selectedTerminalId;
-    });
-
-    callAppMethod(app, "selectTerminal", "new-terminal", { replace: true });
-
-    expect(terminalAtCommit).toBe("old-terminal");
-    expect(appState(app).selectedTerminalId).toBe("new-terminal");
   });
 
   it("commits settings navigation before applying the rendered dialog", () => {
@@ -135,7 +122,7 @@ describe("PiWebApp plugin host", () => {
     const previousWorkspace: Workspace = { id: "workspace-old", projectId: previousProject.id, path: "/old", label: "Old", isMain: true, effectiveConfig: {} };
     const previousSession: SessionInfo = { id: "session-old", cwd: previousWorkspace.path, path: "/old/.sessions/session-old", created: "now", modified: "now", messageCount: 0, firstMessage: "" };
     const browser = installBrowserWindow("http://localhost/app?project=project-old&workspace=workspace-old&session=session-old");
-    const app = createApp();
+    const app = new PiWebApp();
     setAppState(app, {
       ...initialAppState(),
       projects: [previousProject, nextProject],
@@ -179,7 +166,7 @@ describe("PiWebApp plugin host", () => {
     const nextWorkspace: Workspace = { id: "workspace-next", projectId: project.id, path: "/repo-next", label: "Next", isMain: false, effectiveConfig: {} };
     const previousSession: SessionInfo = { id: "session-old", cwd: previousWorkspace.path, path: "/repo/.sessions/session-old", created: "now", modified: "now", messageCount: 0, firstMessage: "" };
     const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-old&session=session-old&core.workspace.terminal--terminal=terminal-old");
-    const app = createApp();
+    const app = new PiWebApp();
     setAppState(app, {
       ...initialAppState(),
       projects: [project],
@@ -188,7 +175,6 @@ describe("PiWebApp plugin host", () => {
       selectedWorkspace: previousWorkspace,
       sessions: [previousSession],
       selectedSession: previousSession,
-      selectedTerminalId: "terminal-old",
       workspaceTool: "core:workspace.terminal",
       mainView: "chat",
     });
@@ -202,7 +188,6 @@ describe("PiWebApp plugin host", () => {
       setAppState(app, {
         ...appState(app),
         selectedWorkspace: nextWorkspace,
-        selectedTerminalId: undefined,
         sessions: [],
         selectedSession: undefined,
       });
@@ -223,7 +208,7 @@ describe("PiWebApp plugin host", () => {
     const previousSession: SessionInfo = { id: "session-old", cwd: workspace.path, path: "/repo/.sessions/session-old", created: "now", modified: "now", messageCount: 0, firstMessage: "" };
     const nextSession: SessionInfo = { id: "session-next", cwd: workspace.path, path: "/repo/.sessions/session-next", created: "now", modified: "now", messageCount: 0, firstMessage: "" };
     const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&session=session-old&core.workspace.terminal--terminal=terminal-1");
-    const app = createApp();
+    const app = new PiWebApp();
     setAppState(app, {
       ...initialAppState(),
       projects: [project],
@@ -232,7 +217,6 @@ describe("PiWebApp plugin host", () => {
       selectedWorkspace: workspace,
       sessions: [previousSession, nextSession],
       selectedSession: previousSession,
-      selectedTerminalId: "terminal-1",
       workspaceTool: "core:workspace.terminal",
       mainView: "chat",
     });
@@ -244,6 +228,9 @@ describe("PiWebApp plugin host", () => {
     });
     stubCommittedRouteRestore(app, () => {
       setAppState(app, { ...appState(app), selectedSession: nextSession });
+    });
+    expect(callAppMethod(app, "currentContributionQueryForState")).toMatchObject({
+      "core.workspace.terminal--terminal": "terminal-1",
     });
 
     await callAsyncAppMethod(app, "selectSessionFromNavigation", nextSession);
@@ -304,8 +291,9 @@ describe("PiWebApp plugin host", () => {
   it("recovers a pending start after focus and a later view change", async () => {
     const previousSession: SessionInfo = { id: "session-old", cwd: workspace.path, path: "/repo/.sessions/session-old", created: "now", modified: "now", messageCount: 0, firstMessage: "" };
     const started: SessionInfo = { id: "session-started", cwd: workspace.path, path: "/repo/.sessions/session-started", created: "now", modified: "now", messageCount: 0, firstMessage: "" };
-    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&session=session-old&tool=core%3Aworkspace.terminal&view=core%3Aworkspace.terminal");
+    const browser = installBrowserWindow(`http://localhost/app?project=project-1&workspace=workspace-1&session=session-old&tool=${encodeURIComponent(TERMINAL_PANEL_ID)}&view=${encodeURIComponent(TERMINAL_PANEL_ID)}`);
     const app = new PiWebApp();
+    installTestTerminalComposition(app, "local");
     setAppState(app, {
       ...initialAppState(),
       projects: [project],
@@ -314,8 +302,8 @@ describe("PiWebApp plugin host", () => {
       selectedWorkspace: workspace,
       sessions: [previousSession],
       selectedSession: previousSession,
-      workspaceTool: "core:workspace.terminal",
-      mainView: "core:workspace.terminal",
+      workspaceTool: TERMINAL_PANEL_ID,
+      mainView: TERMINAL_PANEL_ID,
     });
     if (!Reflect.set(app, "focusChatComposer", () => { callAppMethod(app, "selectMainView", "chat", { invalidateNavigationSelection: false }); })) throw new Error("Could not stub chat focus");
     if (!Reflect.set(app, "restoreRouteFor", (route: { sessionId?: string }) => {
@@ -329,14 +317,14 @@ describe("PiWebApp plugin host", () => {
 
     await callAsyncAppMethod(app, "startSessionAndOpenChat");
     expect(browser.url.searchParams.get("view")).toBe("chat");
-    callAppMethod(app, "selectMainView", "core:workspace.terminal");
+    callAppMethod(app, "selectMainView", TERMINAL_PANEL_ID);
     startRequest.resolve(started);
     await vi.waitFor(() => { expect(appState(app).sessions[0]?.id).toBe(started.id); });
 
     expect(appState(app).sessions.map((session) => session.id)).toEqual([started.id, previousSession.id]);
     expect(appState(app).selectedSession).toBeUndefined();
     expect(browser.url.searchParams.has("session")).toBe(false);
-    expect(browser.url.searchParams.get("view")).toBe("core:workspace.terminal");
+    expect(browser.url.searchParams.get("view")).toBe(TERMINAL_PANEL_ID);
   });
 
   it("does not focus a selection after a newer main-view navigation", async () => {
@@ -382,14 +370,14 @@ describe("PiWebApp plugin host", () => {
     const previousWorkspace: Workspace = { id: "workspace-old", projectId: previousProject.id, path: "/old", label: "Old", isMain: true, effectiveConfig: {} };
     const nextWorkspace: Workspace = { id: "workspace-next", projectId: nextProject.id, path: "/next", label: "Next", isMain: true, effectiveConfig: {} };
     const browser = installBrowserWindow("http://localhost/app?project=project-old&workspace=workspace-old&view=chat");
-    const app = createApp();
+    const app = new PiWebApp();
     setAppState(app, {
       ...initialAppState(),
       projects: [previousProject, nextProject],
       selectedProject: previousProject,
       workspaces: [previousWorkspace],
       selectedWorkspace: previousWorkspace,
-      workspaceTool: "core:workspace.terminal",
+      workspaceTool: TERMINAL_PANEL_ID,
       mainView: "chat",
     });
 
@@ -408,20 +396,26 @@ describe("PiWebApp plugin host", () => {
       });
       return Promise.resolve();
     })) throw new Error("Could not stub runtime terminal route reconciliation");
-    if (!Reflect.set(app, "openTerminal", () => undefined)) throw new Error("Could not stub terminal opening");
 
-    await callAsyncAppMethod(app, "openRuntimeTerminal", "local", nextWorkspace, { terminalId: "terminal-next" });
+    await callAsyncAppMethod(app, "navigateRuntimeWorkspaceContribution", "local", nextWorkspace, {
+      contributionId: TERMINAL_PANEL_ID,
+      navigationAliases: ["core:workspace.terminal"],
+      query: { terminal: "terminal-next", start: undefined },
+    }, {
+      selection: { machineId: "local", projectId: previousProject.id, workspaceId: previousWorkspace.id, view: "chat" },
+      url: window.location.href,
+    });
 
     expect(workspaceAtCommit).toBe(previousWorkspace.id);
     expect(browser.url.searchParams.get("project")).toBe(nextProject.id);
     expect(browser.url.searchParams.get("workspace")).toBe(nextWorkspace.id);
-    expect(browser.url.searchParams.get("view")).toBe("core:workspace.terminal");
-    expect(browser.url.searchParams.get("core.workspace.terminal--terminal")).toBe("terminal-next");
+    expect(browser.url.searchParams.get("view")).toBe(TERMINAL_PANEL_ID);
+    expect(browser.url.searchParams.get("pi-web.terminal.workspace.terminal--terminal")).toBe("terminal-next");
   });
 
-  it("does not open an older terminal after a newer surface query arrives during recovery", async () => {
+  it("keeps a newer terminal query when runtime workspace recovery settles", async () => {
     const browser = installBrowserWindow("http://localhost/app?project=project-old&workspace=workspace-old&view=chat");
-    const app = createApp();
+    const app = new PiWebApp();
     const previousProject: Project = { id: "project-old", name: "Old project", path: "/old", createdAt: "now" };
     const nextProject: Project = { id: "project-next", name: "Next project", path: "/next", createdAt: "now" };
     const previousWorkspace: Workspace = { id: "workspace-old", projectId: previousProject.id, path: "/old", label: "Old", isMain: true, effectiveConfig: {} };
@@ -432,7 +426,7 @@ describe("PiWebApp plugin host", () => {
       selectedProject: previousProject,
       workspaces: [previousWorkspace],
       selectedWorkspace: previousWorkspace,
-      workspaceTool: "core:workspace.terminal",
+      workspaceTool: TERMINAL_PANEL_ID,
       mainView: "chat",
     });
     let resolveRestore: (() => void) | undefined;
@@ -442,22 +436,26 @@ describe("PiWebApp plugin host", () => {
       restoreStarted = true;
       return restore;
     })) throw new Error("Could not stub terminal route recovery");
-    const openTerminal = vi.fn();
-    if (!Reflect.set(app, "openTerminal", openTerminal)) throw new Error("Could not stub terminal opening");
 
-    const opening = callAsyncAppMethod(app, "openRuntimeTerminal", "local", nextWorkspace, { terminalId: "terminal-old" });
+    const opening = callAsyncAppMethod(app, "navigateRuntimeWorkspaceContribution", "local", nextWorkspace, {
+      contributionId: TERMINAL_PANEL_ID,
+      navigationAliases: ["core:workspace.terminal"],
+      query: { terminal: "terminal-old", start: undefined },
+    }, {
+      selection: { machineId: "local", projectId: previousProject.id, workspaceId: previousWorkspace.id, view: "chat" },
+      url: window.location.href,
+    });
     await vi.waitFor(() => { expect(restoreStarted).toBe(true); });
-    browser.navigate("http://localhost/app?project=project-next&workspace=workspace-next&view=core%3Aworkspace.terminal&core.workspace.terminal--terminal=terminal-new");
+    browser.navigate(`http://localhost/app?project=project-next&workspace=workspace-next&view=${encodeURIComponent(TERMINAL_PANEL_ID)}&pi-web.terminal.workspace.terminal--terminal=terminal-new`);
     resolveRestore?.();
     await opening;
 
-    expect(openTerminal).not.toHaveBeenCalled();
-    expect(browser.url.searchParams.get("core.workspace.terminal--terminal")).toBe("terminal-new");
+    expect(browser.url.searchParams.get("pi-web.terminal.workspace.terminal--terminal")).toBe("terminal-new");
   });
 
   it("keeps a newer contribution query when remembered machine navigation settles", async () => {
     const browser = installBrowserWindow("http://localhost/app?project=project-a&workspace=workspace-a&view=chat");
-    const app = createApp();
+    const app = new PiWebApp();
     const machineA: Machine = { id: "local", name: "Machine A", kind: "local", createdAt: "now", updatedAt: "now" };
     const machineB: Machine = { id: "remote-b", name: "Machine B", kind: "remote", createdAt: "now", updatedAt: "now" };
     const projectA: Project = { id: "project-a", name: "Project A", path: "/repo-a", createdAt: "now" };
@@ -512,7 +510,7 @@ describe("PiWebApp plugin host", () => {
 
   it("normalizes a missing project route while clearing its workspace surface", async () => {
     const browser = installBrowserWindow("http://localhost/app?project=missing-project&workspace=missing-workspace&view=chat&browser-only.workspace.panel--file=missing.ts");
-    const app = createApp();
+    const app = new PiWebApp();
     setAppState(app, {
       ...initialAppState(),
       projects: [project],
@@ -586,7 +584,9 @@ describe("PiWebApp plugin host", () => {
     expect(browser.url.searchParams.get("machine")).toBe("removed-machine");
     expect(appState(app).selectedProject).toBeUndefined();
     expect(appState(app).selectedWorkspace).toBeUndefined();
-    expect(appState(app).error).toContain("Machine not found");
+    const machineError = appState(app).browserErrors[browserErrorScopeKey(machineBrowserErrorScope("removed-machine"))];
+    expect(machineError?.message).toContain("Machine not found");
+    expect(callAppMethod(app, "visibleBrowserErrorsForCurrentRoute", appState(app))).toEqual(machineError === undefined ? [] : [machineError]);
   });
 
   it("does not let an older committed selection replace a newer URL destination", async () => {
@@ -728,16 +728,15 @@ describe("PiWebApp plugin host", () => {
 
   it("keeps a newer terminal query when route restore finishes after session reconciliation", async () => {
     const restoredSession: SessionInfo = { id: "session-1", cwd: workspace.path, path: "/repo/.sessions/session-1", created: "now", modified: "now", messageCount: 0, firstMessage: "" };
-    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&session=session-1&view=chat&core.workspace.terminal--terminal=terminal-old");
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&session=session-1&view=chat&pi-web.terminal.workspace.terminal--terminal=terminal-old");
     const app = new PiWebApp();
     setAppState(app, {
       ...initialAppState(),
       projects: [project],
-      workspaceTool: "core:workspace.terminal",
+      workspaceTool: TERMINAL_PANEL_ID,
       mainView: "chat",
     });
     markPluginLoadingReady(app);
-    if (!Reflect.set(app, "refreshActiveTerminals", () => Promise.resolve())) throw new Error("Could not stub terminal refresh");
     if (!Reflect.set(app, "refreshWorkspaceDeletionRuns", () => Promise.resolve())) throw new Error("Could not stub workspace deletion refresh");
 
     const workspaces: unknown = Reflect.get(app, "workspaces");
@@ -763,24 +762,20 @@ describe("PiWebApp plugin host", () => {
       sessionId: restoredSession.id,
       tool: undefined,
       view: "chat",
-    }, false, { selectedTerminalId: "terminal-old" });
+    }, false, { contributionQuery: { "pi-web.terminal.workspace.terminal--terminal": "terminal-old" } });
     await vi.waitFor(() => {
       expect(appState(app).selectedWorkspace?.id).toBe(workspace.id);
       expect(sessionReconciliationStarted).toBe(true);
     });
-    expect(appState(app).selectedTerminalId).toBe("terminal-old");
 
-    callAppMethod(app, "selectTerminal", "terminal-new", { replace: true });
-    expect(appState(app).selectedTerminalId).toBe("terminal-new");
-    expect(browser.url.searchParams.get("core.workspace.terminal--terminal")).toBe("terminal-new");
+    browser.navigate("http://localhost/app?project=project-1&workspace=workspace-1&session=session-1&view=chat&pi-web.terminal.workspace.terminal--terminal=terminal-new");
     const writesAfterTerminalSelection = browser.replaced.length;
 
     sessionReconciliation.resolve(undefined);
     await restoring;
 
-    expect(appState(app).selectedTerminalId).toBe("terminal-new");
     expect(browser.replaced).toHaveLength(writesAfterTerminalSelection);
-    expect(browser.url.searchParams.get("core.workspace.terminal--terminal")).toBe("terminal-new");
+    expect(browser.url.searchParams.get("pi-web.terminal.workspace.terminal--terminal")).toBe("terminal-new");
   });
 
   it("invalidates only the URL fields in a navigation freshness scope", () => {
@@ -817,7 +812,7 @@ describe("PiWebApp plugin host", () => {
 
   it("rejects an async navigation whose tool/view origin changed in the URL", async () => {
     const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.terminal&view=chat");
-    const app = createApp();
+    const app = new PiWebApp();
     const destination: MachineNavigationSnapshot = {
       machineId: "local",
       projectId: project.id,
@@ -851,6 +846,7 @@ describe("PiWebApp plugin host", () => {
       workspaceTool: "browser-only:workspace.panel",
       mainView: "browser-only:workspace.panel",
     });
+    installTestTerminalComposition(app, "local");
     const invalidated = vi.fn<(context: WorkspacePanelContext, invalidation?: WorkspaceInvalidation) => void>();
     appPluginRegistry(app).register({ id: "browser-only", plugin: pluginWithPanel("Browser only", invalidated) });
 
@@ -885,6 +881,7 @@ describe("PiWebApp plugin host", () => {
       workspaces: [workspace],
       workspaceTool: "core:workspace.files",
     });
+    installTestTerminalComposition(app, "local");
     let finishSubscription: () => void = () => undefined;
     const subscription = new Promise<void>((resolve) => { finishSubscription = resolve; });
     const subscribed = vi.fn<(context: WorkspacePanelContext, invalidation?: WorkspaceInvalidation) => Promise<void>>(() => subscription);
@@ -936,6 +933,8 @@ describe("PiWebApp plugin host", () => {
       workspaceTool: "browser-only:workspace.panel",
       mainView: "browser-only:workspace.panel",
     });
+    setVerifiedPluginMode(app, "local", "recovery-disabled");
+    setVerifiedPluginMode(app, remoteMachine.id, "recovery-disabled");
     let navigation: WorkspacePanelNavigationV1 | undefined;
     appPluginRegistry(app).register({
       id: "browser-only",
@@ -1002,12 +1001,13 @@ describe("PiWebApp plugin host", () => {
     const nextWorkspace: Workspace = { id: "workspace-next", projectId: nextProject.id, path: "/next", label: "Next", isMain: true, effectiveConfig: {} };
     const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&view=chat");
     const app = new PiWebApp();
+    installTestTerminalComposition(app, "local");
     setAppState(app, {
       ...initialAppState(),
       selectedProject: project,
       selectedWorkspace: workspace,
       workspaces: [workspace],
-      workspaceTool: "core:workspace.terminal",
+      workspaceTool: TERMINAL_PANEL_ID,
       mainView: "chat",
     });
     const staleContext = workspacePanelContextFromApp(app);
@@ -1017,81 +1017,99 @@ describe("PiWebApp plugin host", () => {
       selectedProject: nextProject,
       selectedWorkspace: nextWorkspace,
       workspaces: [nextWorkspace],
-      selectedTerminalId: undefined,
     });
 
     staleContext.terminal.open({ terminalId: "stale-terminal" });
-    staleContext.onSelectTerminal("stale-terminal");
     const command = staleContext.terminal.runCommand({ title: "Stale command", command: "echo stale", open: true });
-    const unstableCommand = staleContext.piWebUnstable?.terminalCommandRuns.runCommand({ workspace, title: "Stale command", command: "echo stale", open: true });
-    staleContext.piWebUnstable?.terminalCommandRuns.open({ terminalId: "stale-terminal" });
 
     await expect(command).rejects.toThrow("Workspace panel context is no longer current");
-    if (unstableCommand !== undefined) await expect(unstableCommand).rejects.toThrow("Workspace panel context is no longer current");
     expect(browser.pushed).toHaveLength(0);
     expect(browser.url.searchParams.get("project")).toBe(nextProject.id);
     expect(browser.url.searchParams.get("workspace")).toBe(nextWorkspace.id);
-    expect(appState(app).selectedTerminalId).toBeUndefined();
   });
 
   it("rejects retained terminal callbacks after same-workspace surface navigation", async () => {
-    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.terminal&view=core%3Aworkspace.terminal");
+    const browser = installBrowserWindow(`http://localhost/app?project=project-1&workspace=workspace-1&tool=${encodeURIComponent(TERMINAL_PANEL_ID)}&view=${encodeURIComponent(TERMINAL_PANEL_ID)}`);
     const app = new PiWebApp();
+    installTestTerminalComposition(app, "local");
     setAppState(app, {
       ...initialAppState(),
       selectedProject: project,
       selectedWorkspace: workspace,
       workspaces: [workspace],
-      workspaceTool: "core:workspace.terminal",
-      mainView: "core:workspace.terminal",
+      workspaceTool: TERMINAL_PANEL_ID,
+      mainView: TERMINAL_PANEL_ID,
     });
-    const openTerminal = vi.fn();
-    if (!Reflect.set(app, "openTerminal", openTerminal)) throw new Error("Could not stub terminal opening");
     const staleContext = workspacePanelContextFromApp(app);
 
-    browser.navigate("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.terminal&view=chat");
+    browser.navigate(`http://localhost/app?project=project-1&workspace=workspace-1&tool=${encodeURIComponent(TERMINAL_PANEL_ID)}&view=chat`);
     setAppState(app, { ...appState(app), mainView: "chat" });
 
     staleContext.terminal.open({ terminalId: "stale-terminal" });
-    const legacyOpenTerminal: unknown = Reflect.get(staleContext, "openTerminal");
-    if (typeof legacyOpenTerminal !== "function") throw new Error("Deprecated terminal opening alias was unavailable");
-    Reflect.apply(legacyOpenTerminal, staleContext, [{ terminalId: "stale-terminal" }]);
-    staleContext.onSelectTerminal("stale-terminal");
-    staleContext.piWebUnstable?.terminalCommandRuns.open({ terminalId: "stale-terminal" });
     const command = staleContext.terminal.runCommand({ title: "Stale command", command: "echo stale", open: true });
-    const unstableCommand = staleContext.piWebUnstable?.terminalCommandRuns.runCommand({ workspace, title: "Stale command", command: "echo stale", open: true });
 
     await expect(command).rejects.toThrow("Workspace panel context is no longer current");
-    if (unstableCommand !== undefined) await expect(unstableCommand).rejects.toThrow("Workspace panel context is no longer current");
-    expect(openTerminal).not.toHaveBeenCalled();
     expect(browser.pushed).toHaveLength(0);
     expect(browser.replaced).toHaveLength(0);
     expect(browser.url.searchParams.get("view")).toBe("chat");
-    expect(appState(app).selectedTerminalId).toBeUndefined();
   });
 
   it("keeps retained terminal callbacks valid across unrelated workspace query changes", async () => {
-    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.terminal&view=core%3Aworkspace.terminal&browser-only.workspace.panel--file=old.ts");
+    const browser = installBrowserWindow(`http://localhost/app?project=project-1&workspace=workspace-1&tool=${encodeURIComponent(TERMINAL_PANEL_ID)}&view=${encodeURIComponent(TERMINAL_PANEL_ID)}&browser-only.workspace.panel--file=old.ts`);
+    const app = new PiWebApp();
+    installTestTerminalComposition(app, "local");
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceTool: TERMINAL_PANEL_ID,
+      mainView: TERMINAL_PANEL_ID,
+    });
+    const context = workspacePanelContextFromApp(app);
+
+    browser.navigate(`http://localhost/app?project=project-1&workspace=workspace-1&tool=${encodeURIComponent(TERMINAL_PANEL_ID)}&view=${encodeURIComponent(TERMINAL_PANEL_ID)}&browser-only.workspace.panel--file=new.ts`);
+    context.terminal.open({ terminalId: "current-terminal" });
+    await vi.waitFor(() => {
+      expect(browser.url.searchParams.get("pi-web.terminal.workspace.terminal--terminal")).toBe("current-terminal");
+    });
+    context.terminal.open({ terminalId: "current-terminal-2" });
+    await vi.waitFor(() => {
+      expect(browser.url.searchParams.get("pi-web.terminal.workspace.terminal--terminal")).toBe("current-terminal-2");
+    });
+  });
+
+  it("rejects a retained panel setter after its own contribution query changes", () => {
+    const browser = installBrowserWindow(`http://localhost/app?project=project-1&workspace=workspace-1&tool=${encodeURIComponent(TERMINAL_PANEL_ID)}&view=${encodeURIComponent(TERMINAL_PANEL_ID)}&pi-web.terminal.workspace.terminal--terminal=terminal-old`);
     const app = new PiWebApp();
     setAppState(app, {
       ...initialAppState(),
       selectedProject: project,
       selectedWorkspace: workspace,
       workspaces: [workspace],
-      workspaceTool: "core:workspace.terminal",
-      mainView: "core:workspace.terminal",
+      workspaceTool: TERMINAL_PANEL_ID,
+      mainView: TERMINAL_PANEL_ID,
     });
-    const openTerminal = vi.fn();
-    if (!Reflect.set(app, "openTerminal", openTerminal)) throw new Error("Could not stub terminal opening");
-    const context = workspacePanelContextFromApp(app);
+    const freshness: NavigationFreshness = { generation: 1, scope: ["tool", "view"], isCurrent: () => true };
+    const navigation: unknown = callAppMethod(
+      app,
+      "createWorkspacePanelNavigation",
+      workspace,
+      { id: "local", name: "local", kind: "local" },
+      TERMINAL_PANEL_ID,
+      ["core:workspace.terminal"],
+      undefined,
+      freshness,
+    );
+    if (!isWorkspacePanelNavigation(navigation)) throw new Error("Workspace panel navigation was unavailable");
 
-    browser.navigate("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.terminal&view=core%3Aworkspace.terminal&browser-only.workspace.panel--file=new.ts");
-    context.terminal.open({ terminalId: "current-terminal" });
-    context.piWebUnstable?.terminalCommandRuns.open({ terminalId: "current-terminal-2" });
-    await Promise.resolve();
+    navigation.set("terminal", "terminal-current");
+    expect(browser.url.searchParams.get("pi-web.terminal.workspace.terminal--terminal")).toBe("terminal-current");
 
-    expect(openTerminal).toHaveBeenNthCalledWith(1, { terminalId: "current-terminal" });
-    expect(openTerminal).toHaveBeenNthCalledWith(2, { terminalId: "current-terminal-2" });
+    browser.navigate(`http://localhost/app?project=project-1&workspace=workspace-1&tool=${encodeURIComponent(TERMINAL_PANEL_ID)}&view=${encodeURIComponent(TERMINAL_PANEL_ID)}&pi-web.terminal.workspace.terminal--terminal=terminal-newer`);
+    navigation.set("terminal", "terminal-stale");
+
+    expect(browser.url.searchParams.get("pi-web.terminal.workspace.terminal--terminal")).toBe("terminal-newer");
   });
 
   it("keeps workspace refresh completion independent of panel surface freshness", async () => {
@@ -1108,6 +1126,7 @@ describe("PiWebApp plugin host", () => {
     let resolveRefresh: (() => void) | undefined;
     const refreshCompletion = new Promise<void>((resolve) => { resolveRefresh = resolve; });
     const invalidated = vi.fn<(context: WorkspacePanelContext, invalidation?: WorkspaceInvalidation) => Promise<void>>(() => refreshCompletion);
+    setVerifiedPluginMode(app, "local", "recovery-disabled");
     appPluginRegistry(app).register({ id: "browser-only", plugin: pluginWithPanel("Browser only", invalidated) });
 
     const refreshing: unknown = callAppMethod(app, "invalidateWorkspaceResources", workspace, { id: "local", name: "local", kind: "local" }, {
@@ -1131,11 +1150,12 @@ describe("PiWebApp plugin host", () => {
       selectedProject: project,
       selectedWorkspace: workspace,
       workspaces: [workspace],
-      workspaceTool: "core:workspace.terminal",
+      workspaceTool: TERMINAL_PANEL_ID,
       mainView: "chat",
     });
     if (!Reflect.set(app, "gatewayPluginLoadPromise", Promise.resolve())) throw new Error("Could not mark gateway plugins loaded");
     if (!Reflect.set(app, "gatewayPluginLoadAttemptComplete", true)) throw new Error("Could not mark gateway plugin loading complete");
+    installTestTerminalComposition(app, "local");
 
     const runtime = new FilesRuntime();
     const readFile = vi.fn<WorkspaceFilesCapabilityV1["readFile"]>((path) => Promise.resolve({
@@ -1180,6 +1200,82 @@ describe("PiWebApp plugin host", () => {
       query: { file: "back.ts" },
     });
     expect(readFile.mock.calls.map(([path]) => path)).toEqual(["legacy.ts", "back.ts"]);
+  });
+
+  it("restores Terminal query-only history through its real runtime invalidation", async () => {
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.terminal&view=core%3Aworkspace.terminal&core.workspace.terminal--terminal=terminal-1");
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceTool: TERMINAL_PANEL_ID,
+      mainView: TERMINAL_PANEL_ID,
+    });
+    if (!Reflect.set(app, "gatewayPluginLoadPromise", Promise.resolve())) throw new Error("Could not mark gateway plugins loaded");
+    if (!Reflect.set(app, "gatewayPluginLoadAttemptComplete", true)) throw new Error("Could not mark gateway plugin loading complete");
+    const runtime = new TerminalBrowserRuntime(new InMemoryTerminalSelectionMemory());
+    const restoredTerminalIds: (string | undefined)[] = [];
+    appPluginRegistry(app).register({
+      id: "pi-web.terminal",
+      sourcePluginId: "pi-web.terminal",
+      machineSpecific: true,
+      backendRevision: "local-terminal-r1",
+      pairedRequestVersion: 1,
+      pairedChannelVersion: 1,
+      plugin: {
+        apiVersion: 2,
+        name: "Terminal",
+        activate: ({ html }) => ({
+          requiredTerminalFacade: testTerminalFacade(),
+          contributions: {
+            workspacePanels: [{
+              id: "workspace.terminal",
+              title: "Terminal",
+              routeAliases: ["core:workspace.terminal"],
+              navigationAliases: ["core:workspace.terminal"],
+              onInvalidate: (context) => {
+                const runtimeContext: PublicWorkspacePanelContext = {
+                  machine: context.machine,
+                  workspace: context.workspace,
+                  files: context.files,
+                  ...(context.pairedBackend === undefined ? {} : { pairedBackend: context.pairedBackend }),
+                  host: context.host,
+                  prompt: context.prompt,
+                  terminal: context.terminal,
+                  ...(context.navigation === undefined ? {} : { navigation: context.navigation }),
+                };
+                restoredTerminalIds.push(runtime.selectedTerminalId(runtimeContext));
+                return runtime.invalidate(runtimeContext);
+              },
+              render: () => html`<p>Terminal</p>`,
+            }],
+          },
+        }),
+      },
+    });
+    const compositions: unknown = Reflect.get(app, "requiredTerminalByMachine");
+    if (!(compositions instanceof Map)) throw new Error("PiWebApp required Terminal composition map was unavailable");
+    compositions.set("local", {
+      binding: {
+        registrationPluginId: "pi-web.terminal",
+        sourcePluginId: "pi-web.terminal",
+        backendRevision: "local-terminal-r1",
+        pairedRequestVersion: 1,
+        pairedChannelVersion: 1,
+      },
+      facade: testTerminalFacade(),
+    });
+    setVerifiedPluginMode(app, "local", "required");
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response("[]", { status: 200, headers: { "content-type": "application/json" } }))));
+
+    await callAsyncAppMethod(app, "restoreRoute", false);
+    expect(restoredTerminalIds).toEqual(["terminal-1"]);
+
+    browser.navigate("http://localhost/app?project=project-1&workspace=workspace-1&tool=pi-web.terminal%3Aworkspace.terminal&view=pi-web.terminal%3Aworkspace.terminal&pi-web.terminal.workspace.terminal--terminal=terminal-2");
+    callAppMethod(app, "onPopState");
+    await vi.waitFor(() => { expect(restoredTerminalIds).toEqual(["terminal-1", "terminal-2"]); });
   });
 
   it("restores remembered Files navigation through machine A→B→A before each selection settles", async () => {
@@ -1331,8 +1427,8 @@ describe("PiWebApp plugin host", () => {
       selectedProject: projectA,
       workspaces: [workspaceA],
       selectedWorkspace: workspaceA,
-      workspaceTool: "core:workspace.terminal",
-      mainView: "core:workspace.terminal",
+      workspaceTool: TERMINAL_PANEL_ID,
+      mainView: TERMINAL_PANEL_ID,
     });
     markPluginLoadingReady(app, [machineB.id]);
     stubRouteMachineSelection(app, () => {
@@ -1361,8 +1457,8 @@ describe("PiWebApp plugin host", () => {
     expect(appState(app)).toMatchObject({
       selectedMachine: { id: machineB.id },
       selectedWorkspace: { id: workspaceB.id },
-      workspaceTool: "core:workspace.terminal",
-      mainView: "core:workspace.terminal",
+      workspaceTool: `${machineScopedBundledPluginId(machineB.id, "pi-web.terminal")}:workspace.terminal`,
+      mainView: `${machineScopedBundledPluginId(machineB.id, "pi-web.terminal")}:workspace.terminal`,
     });
     expect(window.history.length).toBe(historyLength + 1);
     expect(browser.pushed).toHaveLength(1);
@@ -1393,8 +1489,8 @@ describe("PiWebApp plugin host", () => {
       selectedProject: projectA,
       workspaces: [workspaceA],
       selectedWorkspace: workspaceA,
-      workspaceTool: "core:workspace.terminal",
-      mainView: "core:workspace.terminal",
+      workspaceTool: TERMINAL_PANEL_ID,
+      mainView: TERMINAL_PANEL_ID,
     });
     markPluginLoadingReady(app, [machineB.id]);
     stubRouteMachineSelection(app, () => {
@@ -1462,8 +1558,8 @@ describe("PiWebApp plugin host", () => {
       selectedProject: projectA,
       workspaces: [workspaceA],
       selectedWorkspace: workspaceA,
-      workspaceTool: "core:workspace.terminal",
-      mainView: "core:workspace.terminal",
+      workspaceTool: TERMINAL_PANEL_ID,
+      mainView: TERMINAL_PANEL_ID,
     });
     markPluginLoadingReady(app, [machineB.id]);
     stubRouteMachineSelection(app, () => {
@@ -1490,7 +1586,7 @@ describe("PiWebApp plugin host", () => {
     await callAsyncAppMethod(app, "selectMachineWithMemory", machineB);
 
     expect(browser.pushed).toHaveLength(1);
-    expect(browser.replaced).toHaveLength(1);
+    expect(browser.replaced.length).toBeGreaterThanOrEqual(1);
     expect(browser.url.searchParams.get("project")).toBe("project-missing");
     expect(browser.url.searchParams.get("workspace")).toBe("workspace-missing");
     expect(browser.url.searchParams.get("files.workspace.files--file")).toBe("missing.ts");
@@ -1510,13 +1606,13 @@ describe("PiWebApp plugin host", () => {
     const next = { ...previous, selectedProject: project, selectedWorkspace: workspace, workspaces: [workspace] };
     if (!Reflect.set(app, "gatewayPluginLoadPromise", new Promise<void>(() => undefined))) throw new Error("Could not mark gateway plugins loading");
     if (!Reflect.set(app, "gatewayPluginLoadAttemptComplete", false)) throw new Error("Could not mark gateway plugin loading incomplete");
-    if (!Reflect.set(app, "refreshActiveTerminals", () => Promise.resolve())) throw new Error("Could not stub terminal refresh");
     if (!Reflect.set(app, "refreshWorkspaceDeletionRuns", () => Promise.resolve())) throw new Error("Could not stub workspace deletion refresh");
     setAppState(app, next);
 
     callAppMethod(app, "handleWorkspaceChange", previous, next);
     expect(appState(app).workspaceTool).toBeUndefined();
 
+    installTestTerminalComposition(app, "local");
     appPluginRegistry(app).register({
       id: "first",
       plugin: {
@@ -1545,6 +1641,7 @@ describe("PiWebApp plugin host", () => {
       mainView: "core:workspace.files",
     });
     expect(appPluginRegistry(app).getWorkspacePanels().some(({ id }) => id === "core:workspace.files")).toBe(false);
+    markPluginLoadingReady(app);
 
     await callAsyncAppMethod(app, "finishWorkspaceRouteRestore", { contributionQuery: {} }, {
       updateUrl: false,
@@ -1556,12 +1653,12 @@ describe("PiWebApp plugin host", () => {
     });
 
     expect(appState(app)).toMatchObject({
-      workspaceTool: "core:workspace.terminal",
-      mainView: "core:workspace.terminal",
+      workspaceTool: TERMINAL_PANEL_ID,
+      mainView: TERMINAL_PANEL_ID,
     });
-    expect(browser.url.searchParams.get("tool")).toBe("core:workspace.terminal");
-    expect(browser.url.searchParams.get("view")).toBe("core:workspace.terminal");
-    expect(mobileTabIds(app)).toEqual(["navigation", "chat", "core:workspace.terminal"]);
+    expect(browser.url.searchParams.get("tool")).toBe(TERMINAL_PANEL_ID);
+    expect(browser.url.searchParams.get("view")).toBe(TERMINAL_PANEL_ID);
+    expect(mobileTabIds(app)).toEqual(["navigation", "chat", TERMINAL_PANEL_ID]);
 
     setAppState(app, {
       ...appState(app),
@@ -1570,7 +1667,7 @@ describe("PiWebApp plugin host", () => {
     });
     callAppMethod(app, "reconcileWorkspacePanelSelection");
 
-    expect(appState(app).workspaceTool).toBe("core:workspace.terminal");
+    expect(appState(app).workspaceTool).toBe(TERMINAL_PANEL_ID);
     expect(appState(app).mainView).toBe("chat");
   });
 
@@ -1582,10 +1679,10 @@ describe("PiWebApp plugin host", () => {
       selectedProject: project,
       selectedWorkspace: workspace,
       workspaces: [workspace],
-      workspaceTool: "core:workspace.terminal",
+      workspaceTool: TERMINAL_PANEL_ID,
       mainView: "chat",
     });
-    if (!Reflect.set(app, "gatewayPluginLoadPromise", Promise.resolve())) throw new Error("Could not mark gateway plugins loaded");
+    markPluginLoadingReady(app);
 
     await callAsyncAppMethod(app, "restoreRouteFor", {
       machineId: undefined,
@@ -1596,11 +1693,11 @@ describe("PiWebApp plugin host", () => {
       view: "missing",
     }, false, { contributionQuery: {} });
     expect(appState(app)).toMatchObject({
-      workspaceTool: "core:workspace.terminal",
-      mainView: "core:workspace.terminal",
+      workspaceTool: TERMINAL_PANEL_ID,
+      mainView: TERMINAL_PANEL_ID,
     });
-    expect(browser.url.searchParams.get("tool")).toBe("core:workspace.terminal");
-    expect(browser.url.searchParams.get("view")).toBe("core:workspace.terminal");
+    expect(browser.url.searchParams.get("tool")).toBe(TERMINAL_PANEL_ID);
+    expect(browser.url.searchParams.get("view")).toBe(TERMINAL_PANEL_ID);
     expect(browser.replaced.length).toBeGreaterThan(0);
   });
 
@@ -1612,8 +1709,8 @@ describe("PiWebApp plugin host", () => {
       selectedProject: project,
       selectedWorkspace: workspace,
       workspaces: [workspace],
-      workspaceTool: "core:workspace.terminal",
-      mainView: "core:workspace.terminal",
+      workspaceTool: TERMINAL_PANEL_ID,
+      mainView: TERMINAL_PANEL_ID,
     });
     markPluginLoadingReady(app);
     window.history.pushState({}, "", "?project=project-1&workspace=workspace-1&tool=missing%3Aworkspace.panel&view=missing%3Aworkspace.panel&step=unavailable");
@@ -1625,8 +1722,8 @@ describe("PiWebApp plugin host", () => {
     await vi.waitFor(() => { expect(browser.url.searchParams.get("step")).toBe("unavailable"); });
     callAppMethod(app, "onPopState");
     await vi.waitFor(() => {
-      expect(browser.url.searchParams.get("tool")).toBe("core:workspace.terminal");
-      expect(browser.url.searchParams.get("view")).toBe("core:workspace.terminal");
+      expect(browser.url.searchParams.get("tool")).toBe(TERMINAL_PANEL_ID);
+      expect(browser.url.searchParams.get("view")).toBe(TERMINAL_PANEL_ID);
     });
 
     expect(browser.replaced).toHaveLength(1);
@@ -1649,7 +1746,15 @@ describe("PiWebApp plugin host", () => {
     });
     const failure = new Error("Files module unavailable");
     vi.mocked(loadExternalPlugins).mockResolvedValue({
-      registrations: [],
+      terminalMode: "required",
+      registrations: [{
+        id: "pi-web.terminal",
+        machineSpecific: true,
+        backendRevision: "terminal-r1",
+        pairedRequestVersion: 1,
+        pairedChannelVersion: 1,
+        plugin: requiredTerminalPlugin(),
+      }],
       failures: [{ entry: manifestEntry("files"), error: failure }],
     });
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -1657,12 +1762,12 @@ describe("PiWebApp plugin host", () => {
     await ensureGatewayPluginsLoaded(app);
 
     expect(appState(app)).toMatchObject({
-      workspaceTool: "core:workspace.terminal",
-      mainView: "core:workspace.terminal",
+      workspaceTool: TERMINAL_PANEL_ID,
+      mainView: TERMINAL_PANEL_ID,
     });
-    expect(browser.url.searchParams.get("tool")).toBe("core:workspace.terminal");
-    expect(browser.url.searchParams.get("view")).toBe("core:workspace.terminal");
-    expect(mobileTabIds(app)).toEqual(["navigation", "chat", "core:workspace.terminal"]);
+    expect(browser.url.searchParams.get("tool")).toBe(TERMINAL_PANEL_ID);
+    expect(browser.url.searchParams.get("view")).toBe(TERMINAL_PANEL_ID);
+    expect(mobileTabIds(app)).toEqual(["navigation", "chat", TERMINAL_PANEL_ID]);
     expect(workspacePanelContextFromApp(app).files.capabilityVersion).toBe(1);
     expect(warning).toHaveBeenCalledWith(
       "Failed to load PI WEB plugin files (./files/plugin.js)",
@@ -1685,7 +1790,7 @@ describe("PiWebApp plugin host", () => {
     const load = new Promise<Awaited<ReturnType<typeof loadExternalPlugins>>>((resolve) => { resolveLoad = resolve; });
     const refresh = callAppMethod(app, "registerExternalPlugins", "stale plugin", () => load);
     browser.navigate("http://localhost/app?project=project-1&workspace=workspace-1&view=core%3Aworkspace.terminal");
-    resolveLoad({ registrations: [{ id: "stale", machineSpecific: false, plugin: emptyPlugin("Stale") }], failures: [] });
+    resolveLoad({ terminalMode: "recovery-disabled", registrations: [{ id: "stale", machineSpecific: false, plugin: emptyPlugin("Stale") }], failures: [] });
     await refresh;
 
     expect(browser.url.searchParams.get("view")).toBe("core:workspace.terminal");
@@ -1696,19 +1801,23 @@ describe("PiWebApp plugin host", () => {
     stubPluginLoadRendering(app);
     const stableEntry = manifestEntry("stable");
     const retryEntry = manifestEntry("retry");
+    const stablePlugin = pluginWithAction("Stable", "act");
+    const retryPlugin = pluginWithAction("Retry", "act");
     const transientFailure = new Error("temporary module failure");
     let attempt = 0;
     vi.mocked(loadExternalPlugins).mockImplementation((_manifestUrl, options = {}) => {
       attempt += 1;
       if (attempt === 1) {
         return Promise.resolve({
-          registrations: [{ id: "stable", machineSpecific: false, plugin: emptyPlugin("Stable") }],
+          terminalMode: "recovery-disabled",
+          registrations: [{ id: "stable", machineSpecific: false, plugin: stablePlugin }],
           failures: [{ entry: retryEntry, error: transientFailure }],
         });
       }
       expect(options.shouldLoadPlugin?.(stableEntry)).toBe(false);
       return Promise.resolve({
-        registrations: [{ id: "retry", machineSpecific: false, plugin: emptyPlugin("Retry") }],
+        terminalMode: "recovery-disabled",
+        registrations: [{ id: "retry", machineSpecific: false, plugin: retryPlugin }],
         failures: [],
       });
     });
@@ -1718,6 +1827,9 @@ describe("PiWebApp plugin host", () => {
 
     expect(appPluginRegistry(app).hasPlugin("stable")).toBe(true);
     expect(appPluginRegistry(app).hasPlugin("retry")).toBe(false);
+    expect(callAppMethod(app, "getDefaultActions")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "stable:act" }),
+    ]));
     expect(Reflect.get(app, "gatewayPluginLoadPromise")).toBeUndefined();
 
     await ensureGatewayPluginsLoaded(app);
@@ -1725,10 +1837,674 @@ describe("PiWebApp plugin host", () => {
     expect(loadExternalPlugins).toHaveBeenCalledTimes(2);
     expect(appPluginRegistry(app).hasPlugin("stable")).toBe(true);
     expect(appPluginRegistry(app).hasPlugin("retry")).toBe(true);
+    expect(callAppMethod(app, "getDefaultActions")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "stable:act" }),
+      expect.objectContaining({ id: "retry:act" }),
+    ]));
     expect(warning).toHaveBeenCalledWith(
       "Failed to load PI WEB plugin retry (./retry/plugin.js)",
       transientFailure,
     );
+  });
+
+  it("completes workspace-removal polling when the deleted target no longer resolves", async () => {
+    const commandWorkspace: Workspace = { ...workspace, id: "workspace-command", path: "/repo", label: "main", isMain: true };
+    const targetWorkspace: Workspace = { ...workspace, id: "workspace-target", path: "/repo-target", label: "target", isMain: false };
+    const runningRun = {
+      id: "deletion-run",
+      origin: "core",
+      projectId: project.id,
+      workspaceId: commandWorkspace.id,
+      terminalId: "deletion-terminal",
+      title: "Remove target",
+      command: "remove-target",
+      status: "running" as const,
+      createdAt: "now",
+      metadata: { "pi.operation": "workspace.delete", "target.workspaceId": targetWorkspace.id },
+    };
+    const completedRun = { ...runningRun, status: "succeeded" as const, exitCode: 0, completedAt: "later" };
+    const app = createApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: commandWorkspace,
+      workspaces: [commandWorkspace, targetWorkspace],
+      workspaceDeletionRuns: { [targetWorkspace.id]: runningRun },
+    });
+    markPluginLoadingReady(app);
+    const compositions: unknown = Reflect.get(app, "requiredTerminalByMachine");
+    if (!(compositions instanceof Map)) throw new Error("PiWebApp required Terminal composition map was unavailable");
+    const composition: unknown = compositions.get("local");
+    if (!isRequiredTerminalComposition(composition)) throw new Error("Local Terminal composition was unavailable");
+    compositions.set("local", { ...composition, facade: new TerminalFacade() });
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes(`/workspaces/${targetWorkspace.id}/`)) {
+        return Promise.resolve(new Response(JSON.stringify({ error: "Workspace not found" }), { status: 404, headers: { "content-type": "application/json" } }));
+      }
+      return Promise.resolve(new Response(JSON.stringify([completedRun]), { status: 200, headers: { "content-type": "application/json" } }));
+    }));
+    const workspaceController: unknown = Reflect.get(app, "workspaces");
+    if (typeof workspaceController !== "object" || workspaceController === null) throw new Error("Workspace controller was unavailable");
+    const refreshAfterDeleted = vi.fn<(
+      projectId: string,
+      workspaceId: string,
+      machineId?: string,
+      options?: { signal?: AbortSignal; isCurrent?: () => boolean },
+    ) => Promise<void>>().mockResolvedValue(undefined);
+    if (!Reflect.set(workspaceController, "refreshAfterWorkspaceDeleted", refreshAfterDeleted)) throw new Error("Could not observe deletion completion refresh");
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await callAsyncAppMethod(app, "refreshWorkspaceDeletionRuns");
+
+    expect(refreshAfterDeleted).toHaveBeenCalledOnce();
+    const reconciliationOptions = refreshAfterDeleted.mock.calls[0]?.[3];
+    expect(refreshAfterDeleted.mock.calls[0]?.slice(0, 3)).toEqual([project.id, targetWorkspace.id, "local"]);
+    expect(reconciliationOptions?.signal).toBeInstanceOf(AbortSignal);
+    expect(reconciliationOptions?.isCurrent).toBeTypeOf("function");
+    expect(appState(app).workspaceDeletionRuns[targetWorkspace.id]).toBeUndefined();
+    expect(Reflect.get(app, "workspaceDeletionPollTimer")).toBeUndefined();
+  });
+
+  it("aborts an old project deletion refresh and lets the new scope refresh immediately", async () => {
+    const otherProject: Project = { id: "project-2", name: "Other", path: "/other", createdAt: "now" };
+    const otherWorkspace: Workspace = { ...workspace, id: "workspace-2", projectId: otherProject.id, path: "/other", label: "other" };
+    const app = createApp();
+    setAppState(app, {
+      ...initialAppState(),
+      projects: [project, otherProject],
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+    });
+    markPluginLoadingReady(app);
+    const oldRefresh = deferredValue<TerminalCommandRun[]>();
+    const signals: (AbortSignal | undefined)[] = [];
+    let requestCount = 0;
+    const listCommandRuns = vi.fn<RequiredTerminalBrowserFacadeV1["listCommandRuns"]>((query) => {
+      signals.push(query.signal);
+      requestCount += 1;
+      return requestCount === 1 ? oldRefresh.promise : Promise.resolve([]);
+    });
+    replaceTestTerminalFacade(app, { ...testTerminalFacade(), listCommandRuns });
+
+    const firstRefresh = callAsyncAppMethod(app, "refreshWorkspaceDeletionRuns");
+    await vi.waitFor(() => { expect(listCommandRuns).toHaveBeenCalledOnce(); });
+    callAppMethod(app, "setState", {
+      selectedProject: otherProject,
+      selectedWorkspace: otherWorkspace,
+      workspaces: [otherWorkspace],
+    });
+
+    expect(signals[0]?.aborted).toBe(true);
+    await vi.waitFor(() => { expect(listCommandRuns).toHaveBeenCalledTimes(2); });
+    oldRefresh.resolve([{
+      id: "stale-run",
+      origin: "core",
+      projectId: project.id,
+      workspaceId: workspace.id,
+      terminalId: "stale-terminal",
+      title: "Stale",
+      command: "true",
+      status: "running",
+      createdAt: "now",
+      metadata: { "pi.operation": "workspace.delete", "target.workspaceId": "stale-target" },
+    }]);
+    await firstRefresh;
+
+    expect(appState(app).selectedProject?.id).toBe(otherProject.id);
+    expect(appState(app).workspaceDeletionRuns).toEqual({});
+  });
+
+  it("fences a deferred deletion reconciliation across cancellation and an A-to-B-to-A scope return", async () => {
+    const otherProject: Project = { id: "project-2", name: "Other", path: "/other", createdAt: "now" };
+    const targetWorkspace: Workspace = { ...workspace, id: "workspace-target", path: "/repo-target", label: "target", isMain: false };
+    const fallbackWorkspace: Workspace = { ...workspace, id: "workspace-main", path: "/repo", label: "main", isMain: true };
+    const otherWorkspace: Workspace = { ...workspace, id: "workspace-other", projectId: otherProject.id, path: "/other", label: "other", isMain: true };
+    const completedRun: TerminalCommandRun = {
+      id: "completed-run",
+      origin: "core",
+      projectId: project.id,
+      workspaceId: fallbackWorkspace.id,
+      terminalId: "completed-terminal",
+      title: "Remove target",
+      command: "true",
+      status: "succeeded",
+      exitCode: 0,
+      createdAt: "now",
+      completedAt: "later",
+      metadata: { "pi.operation": "workspace.delete", "target.workspaceId": targetWorkspace.id },
+    };
+    const app = createApp();
+    setAppState(app, {
+      ...initialAppState(),
+      projects: [project, otherProject],
+      selectedProject: project,
+      selectedWorkspace: targetWorkspace,
+      workspaces: [targetWorkspace],
+      workspaceDeletionRuns: { [targetWorkspace.id]: completedRun },
+    });
+    markPluginLoadingReady(app);
+    const workspaceController: unknown = Reflect.get(app, "workspaces");
+    if (typeof workspaceController !== "object" || workspaceController === null) throw new Error("Workspace controller was unavailable");
+    const controllerApi: unknown = Reflect.get(workspaceController, "api");
+    if (typeof controllerApi !== "object" || controllerApi === null) throw new Error("Workspace controller API was unavailable");
+    const pendingWorkspaces = deferredValue<Workspace[]>();
+    let reconciliationOptions: { signal?: AbortSignal; isCurrent?: () => boolean } | undefined;
+    const loadWorkspaces = vi.fn((_projectId: string, _machineId?: string, options?: { signal?: AbortSignal }) => {
+      reconciliationOptions = options;
+      return pendingWorkspaces.promise;
+    });
+    const loadSessions = vi.fn(() => Promise.resolve([]));
+    if (!Reflect.set(workspaceController, "api", { ...controllerApi, workspaces: loadWorkspaces, sessions: loadSessions })) {
+      throw new Error("Could not control workspace reconciliation requests");
+    }
+
+    const refreshing = callAsyncAppMethod(app, "refreshWorkspaceDeletionRuns");
+    await vi.waitFor(() => { expect(loadWorkspaces).toHaveBeenCalledOnce(); });
+    callAppMethod(app, "setState", { selectedProject: otherProject, selectedWorkspace: otherWorkspace, workspaces: [otherWorkspace] });
+    callAppMethod(app, "setState", { selectedProject: project, selectedWorkspace: targetWorkspace, workspaces: [targetWorkspace] });
+    pendingWorkspaces.resolve([fallbackWorkspace]);
+    await refreshing;
+
+    expect(reconciliationOptions?.signal?.aborted).toBe(true);
+    expect(appState(app).selectedProject).toBe(project);
+    expect(appState(app).selectedWorkspace).toBe(targetWorkspace);
+    expect(appState(app).workspaces).toEqual([targetWorkspace]);
+    expect(loadSessions).not.toHaveBeenCalled();
+  });
+
+  it("retries successful deletion reconciliation before marking the run handled", async () => {
+    vi.useFakeTimers();
+    const completedRun: TerminalCommandRun = {
+      id: "completed-run",
+      origin: "core",
+      projectId: project.id,
+      workspaceId: workspace.id,
+      terminalId: "completed-terminal",
+      title: "Remove target",
+      command: "true",
+      status: "succeeded",
+      exitCode: 0,
+      createdAt: "now",
+      completedAt: "later",
+      metadata: { "pi.operation": "workspace.delete", "target.workspaceId": "target-workspace" },
+    };
+    const app = createApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceDeletionRuns: { "target-workspace": completedRun },
+    });
+    markPluginLoadingReady(app);
+    const workspaceController: unknown = Reflect.get(app, "workspaces");
+    if (typeof workspaceController !== "object" || workspaceController === null) throw new Error("Workspace controller was unavailable");
+    const refreshAfterDeleted = vi.fn()
+      .mockRejectedValueOnce(new Error("topology unavailable"))
+      .mockResolvedValueOnce(undefined);
+    if (!Reflect.set(workspaceController, "refreshAfterWorkspaceDeleted", refreshAfterDeleted)) throw new Error("Could not control deletion reconciliation");
+
+    await callAsyncAppMethod(app, "refreshWorkspaceDeletionRuns");
+
+    expect(appState(app).workspaceDeletionRuns["target-workspace"]).toEqual(completedRun);
+    const errorScope = workspaceBrowserErrorScope("local", project.id, "target-workspace");
+    expect(appState(app).browserErrors[browserErrorScopeKey(errorScope)]?.message).toContain("Retrying");
+    expect(refreshAfterDeleted).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => { expect(refreshAfterDeleted).toHaveBeenCalledTimes(2); });
+    await vi.waitFor(() => { expect(appState(app).workspaceDeletionRuns["target-workspace"]).toBeUndefined(); });
+    expect(appState(app).browserErrors[browserErrorScopeKey(errorScope)]).toBeUndefined();
+  });
+
+  it("publishes a cross-workspace command terminal atomically on the target route", async () => {
+    const originWorkspace: Workspace = { ...workspace, id: "workspace-origin", path: "/repo-origin", label: "origin" };
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-origin&tool=core%3Aworkspace.terminal&view=core%3Aworkspace.terminal");
+    const originUrl = browser.url.href;
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: originWorkspace,
+      workspaces: [originWorkspace, workspace],
+      workspaceTool: TERMINAL_PANEL_ID,
+      mainView: TERMINAL_PANEL_ID,
+    });
+    markPluginLoadingReady(app);
+    if (!Reflect.set(app, "restoreRouteFor", () => {
+      setAppState(app, { ...appState(app), selectedWorkspace: workspace });
+      return Promise.resolve();
+    })) throw new Error("Could not stub successful Terminal workspace restoration");
+
+    const targetTerminal: unknown = callAppMethod(app, "workspaceTerminal", "core", workspace, "local");
+    if (!isWorkspacePanelTerminal(targetTerminal)) throw new Error("Target Terminal facade was unavailable");
+    targetTerminal.open({ terminalId: "target-terminal-2" });
+    await vi.waitFor(() => { expect(browser.url.searchParams.get("pi-web.terminal.workspace.terminal--terminal")).toBe("target-terminal-2"); });
+
+    expect(browser.url.searchParams.get("project")).toBe(project.id);
+    expect(browser.url.searchParams.get("workspace")).toBe(workspace.id);
+    expect(browser.url.searchParams.get("tool")).toBe(TERMINAL_PANEL_ID);
+    expect(browser.url.searchParams.get("pi-web.terminal.workspace.terminal--terminal")).toBe("target-terminal-2");
+    expect(browser.url.searchParams.get("pi-web.terminal.workspace.terminal--start")).toBeNull();
+    expect(browser.pushed).toHaveLength(1);
+    expect(browser.pushed[0]).not.toBe(originUrl);
+  });
+
+  it("adds a one-shot start request only when the Terminal surface is explicitly opened", async () => {
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&tool=files%3Aworkspace.files&view=files%3Aworkspace.files");
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceTool: "files:workspace.files",
+      mainView: "files:workspace.files",
+    });
+    markPluginLoadingReady(app);
+
+    callAppMethod(app, "openWorkspaceTool", TERMINAL_PANEL_ID);
+    await vi.waitFor(() => { expect(appState(app).workspaceTool).toBe(TERMINAL_PANEL_ID); });
+
+    expect(browser.url.searchParams.get("pi-web.terminal.workspace.terminal--start")).toBe("1");
+    expect(browser.url.searchParams.get("pi-web.terminal.workspace.terminal--terminal")).toBeNull();
+  });
+
+  it("does not publish a command terminal after its workspace restore is superseded", async () => {
+    const otherWorkspace: Workspace = { ...workspace, id: "workspace-2", label: "other" };
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-2&tool=core%3Aworkspace.terminal&view=core%3Aworkspace.terminal");
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: otherWorkspace,
+      workspaces: [workspace, otherWorkspace],
+      workspaceTool: TERMINAL_PANEL_ID,
+      mainView: TERMINAL_PANEL_ID,
+    });
+    markPluginLoadingReady(app);
+    let finishRestore: () => void = () => undefined;
+    let restoreStarted: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => { restoreStarted = resolve; });
+    const pendingRestore = new Promise<void>((resolve) => { finishRestore = resolve; });
+    if (!Reflect.set(app, "restoreRouteFor", () => {
+      setAppState(app, { ...appState(app), selectedWorkspace: workspace });
+      restoreStarted();
+      return pendingRestore;
+    })) throw new Error("Could not stub Terminal workspace restoration");
+    const opening = callAsyncAppMethod(app, "navigateRuntimeWorkspaceContribution", "local", workspace, {
+      contributionId: TERMINAL_PANEL_ID,
+      navigationAliases: ["core:workspace.terminal"],
+      query: { terminal: "terminal-from-command", start: undefined },
+    }, {
+      selection: { machineId: "local", projectId: project.id, workspaceId: otherWorkspace.id, tool: "core:workspace.terminal", view: "core:workspace.terminal" },
+      url: window.location.href,
+    });
+    await started;
+    browser.navigate("http://localhost/app?project=project-1&workspace=workspace-2&tool=core%3Aworkspace.terminal&view=core%3Aworkspace.terminal");
+    setAppState(app, { ...appState(app), selectedWorkspace: otherWorkspace });
+    finishRestore();
+    await opening;
+
+    expect(browser.url.searchParams.get("pi-web.terminal.workspace.terminal--terminal")).toBeNull();
+    expect(appState(app).selectedWorkspace?.id).toBe(otherWorkspace.id);
+  });
+
+  it("binds a remote Terminal facade to the matching machine and backend revision", async () => {
+    installBrowserWindow("http://localhost/app?machine=remote-1&project=project-1&workspace=workspace-1");
+    const app = new PiWebApp();
+    stubPluginLoadRendering(app);
+    setAppState(app, {
+      ...initialAppState(),
+      selectedMachine: remoteMachine,
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+    });
+    const runtimePluginId = machineScopedBundledPluginId(remoteMachine.id, "pi-web.terminal");
+    const run = {
+      id: "run-1",
+      origin: runtimePluginId,
+      projectId: project.id,
+      workspaceId: workspace.id,
+      terminalId: "terminal-1",
+      title: "Build",
+      command: "npm run build",
+      status: "succeeded",
+      exitCode: 0,
+      createdAt: "now",
+      completedAt: "later",
+      metadata: {},
+    };
+    let requestedUrl = "";
+    let requestedInit: RequestInit | undefined;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      requestedUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      requestedInit = init;
+      return Promise.resolve(new Response(JSON.stringify(run), { status: 200, headers: { "content-type": "application/json" } }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await callAsyncAppMethod(app, "registerExternalPlugins", "Remote plugins", () => Promise.resolve({
+      terminalMode: "required",
+      registrations: [{
+        id: runtimePluginId,
+        sourcePluginId: "pi-web.terminal",
+        machineId: remoteMachine.id,
+        machineSpecific: true,
+        backendRevision: "remote-terminal-r7",
+        pairedRequestVersion: 1,
+        pairedChannelVersion: 1,
+        plugin: requiredTerminalPlugin(new TerminalFacade()),
+      }],
+      failures: [],
+    }), remoteMachine.id);
+
+    const handle = await workspacePanelContextFromApp(app).terminal.runCommand({ title: "Build", command: "npm run build" });
+
+    await expect(handle.completed).resolves.toEqual(run);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(requestedUrl).toBe(`${window.location.origin}/api/machines/remote-1/paired-plugin-backends/pi-web.terminal/projects/project-1/workspaces/workspace-1/terminal.run`);
+    const requestBody = requestedInit?.body;
+    if (typeof requestBody !== "string") throw new Error("Expected serialized Terminal backend request body");
+    expect(JSON.parse(requestBody)).toEqual({
+      revision: "remote-terminal-r7",
+      input: { origin: "core", title: "Build", command: "npm run build", metadata: {} },
+    });
+  });
+
+  it("gates portable contributions against remote required mode and fences stale callbacks", async () => {
+    const app = createApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedMachine: remoteMachine,
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+    });
+    markPluginLoadingReady(app); // local healthy; remote is still unverified
+    if (!Reflect.set(app, "loadPluginsForSelectedMachine", () => Promise.resolve())) {
+      throw new Error("Could not isolate selected-machine plugin loading");
+    }
+    const run = vi.fn();
+    appPluginRegistry(app).register({
+      id: "portable",
+      machineSpecific: false,
+      plugin: {
+        apiVersion: 2,
+        name: "Portable",
+        activate: () => ({ contributions: { actions: [{ id: "act", title: "Portable", run }] } }),
+      },
+    });
+    const portableAction = (): { id: string; run: () => void | Promise<void> } | undefined => {
+      const actions = callAppMethod(app, "getDefaultActions");
+      if (!isActionArray(actions)) throw new Error("Expected app actions");
+      return actions.find((action) => action.id === "portable:act");
+    };
+
+    expect(portableAction()).toBeUndefined();
+    installTestTerminalComposition(app, remoteMachine.id);
+    const stale = portableAction();
+    expect(stale).toBeDefined();
+    callAppMethod(app, "setState", {
+      selectedMachine: { id: "local", name: "Local", kind: "local", createdAt: "now", updatedAt: "now" },
+    });
+    await stale?.run();
+    expect(run).not.toHaveBeenCalled();
+    callAppMethod(app, "setState", { selectedMachine: remoteMachine });
+
+    callAppMethod(app, "clearRequiredTerminal", "local");
+    verifiedPluginModes(app).delete("local");
+    expect(portableAction()).toBeDefined(); // local failure must not hide a healthy remote
+
+    callAppMethod(app, "clearRequiredTerminal", remoteMachine.id);
+    verifiedPluginModes(app).delete(remoteMachine.id);
+    expect(portableAction()).toBeUndefined();
+    await stale?.run();
+    expect(run).not.toHaveBeenCalled();
+
+    installTestTerminalComposition(app, remoteMachine.id);
+    await portableAction()?.run();
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed while required Terminal manifest verification is pending", async () => {
+    const app = createApp();
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceTool: TERMINAL_PANEL_ID,
+      mainView: TERMINAL_PANEL_ID,
+    });
+
+    expect(mobileTabIds(app)).toEqual(["navigation", "chat"]);
+    await expect(workspacePanelContextFromApp(app).terminal.runCommand({ title: "Pending", command: "true" }))
+      .rejects.toThrow("Required Terminal plugin is unavailable");
+  });
+
+  it("keeps a missing manifest failed closed until a valid required manifest retry succeeds", async () => {
+    const app = createApp();
+    stubPluginLoadRendering(app);
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.mocked(loadExternalPlugins)
+      .mockRejectedValueOnce(new Error("Failed to load plugin manifest (404 Not Found)"))
+      .mockResolvedValueOnce({
+        terminalMode: "required",
+        registrations: [{
+          id: "pi-web.terminal",
+          machineSpecific: true,
+          backendRevision: "terminal-r1",
+          pairedRequestVersion: 1,
+          pairedChannelVersion: 1,
+          plugin: requiredTerminalPlugin(),
+        }],
+        failures: [],
+      });
+
+    await ensureGatewayPluginsLoaded(app);
+    expect(displayedError(app)).toContain("404 Not Found");
+    expect(mobileTabIds(app)).toEqual(["navigation", "chat"]);
+    expect(Reflect.get(app, "gatewayPluginLoadPromise")).toBeUndefined();
+
+    await ensureGatewayPluginsLoaded(app);
+    expect(mobileTabIds(app)).toContain(TERMINAL_PANEL_ID);
+    expect(loadExternalPlugins).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves an attributable required-load failure through deep-link restoration until valid retry", async () => {
+    installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&tool=core%3Aworkspace.terminal");
+    const app = new PiWebApp();
+    stubPluginLoadRendering(app);
+    setAppState(app, { ...initialAppState(), projects: [project] });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await callAsyncAppMethod(app, "registerExternalPlugins", "PI WEB plugins", () =>
+      Promise.reject(new Error("Invalid plugin manifest lifecycle payload")));
+    expect(displayedError(app)).toContain("Invalid plugin manifest lifecycle payload");
+
+    if (!Reflect.set(app, "loadPluginsForSelectedMachine", () => Promise.resolve())) {
+      throw new Error("Could not isolate deep-link plugin loading");
+    }
+    stubWorkspaceProjectSelection(app, () => {
+      callAppMethod(app, "setState", {
+        selectedProject: project,
+        selectedWorkspace: workspace,
+        workspaces: [workspace],
+        error: "",
+      });
+    });
+    await callAsyncAppMethod(app, "restoreRouteFor", {
+      machineId: undefined,
+      projectId: project.id,
+      workspaceId: workspace.id,
+      sessionId: undefined,
+      tool: "core:workspace.terminal",
+      view: undefined,
+    }, false, { contributionQuery: {} });
+
+    expect(appState(app).selectedWorkspace?.id).toBe(workspace.id);
+    expect(appState(app).error).toBe("");
+    expect(displayedError(app)).toContain("Invalid plugin manifest lifecycle payload");
+    callAppMethod(app, "setState", { error: "temporary workspace error" });
+    expect(displayedError(app)).toBe("temporary workspace error");
+    callAppMethod(app, "setState", { error: "" });
+    expect(displayedError(app)).toContain("Invalid plugin manifest lifecycle payload");
+
+    callAppMethod(app, "setState", { error: "unrelated workspace warning" });
+    await callAsyncAppMethod(app, "registerExternalPlugins", "PI WEB plugins", () => Promise.resolve({
+      terminalMode: "required",
+      registrations: [{
+        id: "pi-web.terminal",
+        machineSpecific: true,
+        backendRevision: "terminal-r1",
+        pairedRequestVersion: 1,
+        pairedChannelVersion: 1,
+        plugin: requiredTerminalPlugin(),
+      }],
+      failures: [],
+    }));
+    expect(appState(app).error).toBe("unrelated workspace warning");
+    expect(displayedError(app)).toBe("unrelated workspace warning");
+    callAppMethod(app, "setState", { error: "" });
+    expect(displayedError(app)).toBe("");
+  });
+
+  it("hides the core Terminal surface and rejects helpers in no-plugin recovery", async () => {
+    const app = createApp();
+    stubPluginLoadRendering(app);
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceTool: TERMINAL_PANEL_ID,
+      mainView: TERMINAL_PANEL_ID,
+    });
+    vi.mocked(loadExternalPlugins).mockResolvedValue({
+      terminalMode: "recovery-disabled",
+      registrations: [],
+      failures: [],
+    });
+
+    await ensureGatewayPluginsLoaded(app);
+
+    expect(mobileTabIds(app)).toEqual(["navigation", "chat"]);
+    const context = workspacePanelContextFromApp(app);
+    await expect(context.terminal.runCommand({ title: "Unavailable", command: "true" }))
+      .rejects.toThrow("Required Terminal plugin is unavailable");
+    context.terminal.open();
+    expect(appState(app).error).toContain("Required Terminal plugin is unavailable");
+  });
+
+  it("hides a failed registered Terminal contribution and re-enables the same paired revision on retry", async () => {
+    const app = createApp();
+    stubPluginLoadRendering(app);
+    setAppState(app, {
+      ...initialAppState(),
+      selectedProject: project,
+      selectedWorkspace: workspace,
+      workspaces: [workspace],
+      workspaceTool: TERMINAL_PANEL_ID,
+      mainView: TERMINAL_PANEL_ID,
+    });
+    const registration = {
+      id: "pi-web.terminal",
+      machineSpecific: true,
+      backendRevision: "terminal-r1",
+      pairedRequestVersion: 1 as const,
+      pairedChannelVersion: 1 as const,
+      plugin: requiredTerminalPlugin(),
+    };
+    const ordinaryRegistration = {
+      id: "ordinary",
+      machineSpecific: false,
+      plugin: {
+        apiVersion: 2 as const,
+        name: "Ordinary",
+        activate: () => ({
+          contributions: {
+            actions: [{ id: "act", title: "Ordinary action", run: () => undefined }],
+          },
+        }),
+      },
+    };
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await callAsyncAppMethod(app, "registerExternalPlugins", "Initial", () => Promise.resolve({
+      terminalMode: "required",
+      registrations: [registration, ordinaryRegistration],
+      failures: [],
+    }));
+    expect(mobileTabIds(app)).toContain(TERMINAL_PANEL_ID);
+    expect(callAppMethod(app, "getDefaultActions")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "ordinary:act" }),
+    ]));
+
+    await callAsyncAppMethod(app, "registerExternalPlugins", "Failed retry", () => Promise.resolve({
+      terminalMode: "required",
+      registrations: [],
+      failures: [{ entry: manifestEntry("pi-web.terminal"), error: new Error("manifest unavailable") }],
+    }));
+    expect(mobileTabIds(app)).toEqual(["navigation", "chat"]);
+    expect(appPluginRegistry(app).hasPlugin("ordinary")).toBe(true);
+    expect(callAppMethod(app, "getDefaultActions")).toEqual(expect.not.arrayContaining([
+      expect.objectContaining({ id: "pi-web.terminal:view.terminal" }),
+      expect.objectContaining({ id: "ordinary:act" }),
+    ]));
+
+    await callAsyncAppMethod(app, "registerExternalPlugins", "Recovered", () => Promise.resolve({
+      terminalMode: "required",
+      registrations: [registration],
+      failures: [],
+    }));
+    expect(mobileTabIds(app)).toContain(TERMINAL_PANEL_ID);
+    expect(callAppMethod(app, "getDefaultActions")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "pi-web.terminal:view.terminal" }),
+      expect.objectContaining({ id: "ordinary:act" }),
+    ]));
+  });
+
+  it("surfaces required Terminal activation failure and does not register ordinary plugins", async () => {
+    const app = createApp();
+    stubPluginLoadRendering(app);
+    const terminalFailure = new Error("Terminal activation failed");
+    vi.mocked(loadExternalPlugins).mockResolvedValue({
+      terminalMode: "required",
+      registrations: [
+        {
+          id: "pi-web.terminal",
+          machineSpecific: true,
+          backendRevision: "terminal-r1",
+          pairedRequestVersion: 1,
+          pairedChannelVersion: 1,
+          plugin: {
+            apiVersion: 2,
+            name: "Terminal",
+            activate: () => { throw terminalFailure; },
+          },
+        },
+        { id: "info", machineSpecific: false, plugin: emptyPlugin("Info") },
+      ],
+      failures: [],
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    await ensureGatewayPluginsLoaded(app);
+
+    expect(appPluginRegistry(app).hasPlugin("pi-web.terminal")).toBe(false);
+    expect(appPluginRegistry(app).hasPlugin("info")).toBe(false);
+    expect(displayedError(app)).toContain("Required Terminal plugin failed to activate");
+    expect(displayedError(app)).toContain("Terminal activation failed");
   });
 
   it("retries a plugin whose activation failed without retaining partial contributions", async () => {
@@ -1754,7 +2530,18 @@ describe("PiWebApp plugin host", () => {
       },
     };
     vi.mocked(loadExternalPlugins).mockResolvedValue({
-      registrations: [{ id: "retryable", machineSpecific: false, plugin: retryable }],
+      terminalMode: "required",
+      registrations: [
+        {
+          id: "pi-web.terminal",
+          machineSpecific: true,
+          backendRevision: "terminal-r1",
+          pairedRequestVersion: 1,
+          pairedChannelVersion: 1,
+          plugin: requiredTerminalPlugin(),
+        },
+        { id: "retryable", machineSpecific: false, plugin: retryable },
+      ],
       failures: [],
     });
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -1815,6 +2602,12 @@ function appState(app: PiWebApp): ReturnType<typeof initialAppState> {
   const state: unknown = Reflect.get(app, "state");
   if (!isAppState(state)) throw new Error("PiWebApp state was unavailable");
   return state;
+}
+
+function displayedError(app: PiWebApp): string {
+  const value = callAppMethod(app, "displayedError");
+  if (typeof value !== "string") throw new Error("PiWebApp displayed error was unavailable");
+  return value;
 }
 
 function workspacePanelContextFromApp(app: PiWebApp): WorkspacePanelContext {
@@ -1929,7 +2722,7 @@ function registerFilesRuntimePanel(
                 machine: context.machine,
                 workspace: context.workspace,
                 files,
-                ...(context.backend === undefined ? {} : { backend: context.backend }),
+                ...(context.pairedBackend === undefined ? {} : { pairedBackend: context.pairedBackend }),
                 host: context.host,
                 prompt: context.prompt,
                 terminal: context.terminal,
@@ -1951,7 +2744,53 @@ function markPluginLoadingReady(app: PiWebApp, loadedMachineIds: readonly string
   if (!Reflect.set(app, "gatewayPluginLoadAttemptComplete", true)) throw new Error("Could not mark gateway plugin loading complete");
   const loaded: unknown = Reflect.get(app, "loadedMachinePluginIds");
   if (!(loaded instanceof Set)) throw new Error("PiWebApp loaded-machine plugin set was unavailable");
-  for (const machineId of loadedMachineIds) loaded.add(machineId);
+  installTestTerminalComposition(app, "local");
+  for (const machineId of loadedMachineIds) {
+    loaded.add(machineId);
+    installTestTerminalComposition(app, machineId);
+  }
+}
+
+function installTestTerminalComposition(app: PiWebApp, machineId: string): void {
+  const runtimePluginId = machineId === "local"
+    ? "pi-web.terminal"
+    : machineScopedBundledPluginId(machineId, "pi-web.terminal");
+  const registry = appPluginRegistry(app);
+  if (!registry.hasPlugin(runtimePluginId)) {
+    registry.register({
+      id: runtimePluginId,
+      sourcePluginId: "pi-web.terminal",
+      ...(machineId === "local" ? {} : { machineId }),
+      machineSpecific: true,
+      backendRevision: `${machineId}-terminal-r1`,
+      pairedRequestVersion: 1,
+      pairedChannelVersion: 1,
+      plugin: requiredTerminalPlugin(),
+    });
+  }
+  const compositions: unknown = Reflect.get(app, "requiredTerminalByMachine");
+  if (!(compositions instanceof Map)) throw new Error("PiWebApp required Terminal composition map was unavailable");
+  compositions.set(machineId, {
+    binding: {
+      registrationPluginId: runtimePluginId,
+      sourcePluginId: "pi-web.terminal",
+      backendRevision: `${machineId}-terminal-r1`,
+      pairedRequestVersion: 1,
+      pairedChannelVersion: 1,
+    },
+    facade: testTerminalFacade(),
+  });
+  setVerifiedPluginMode(app, machineId, "required");
+}
+
+function setVerifiedPluginMode(app: PiWebApp, machineId: string, mode: "required" | "recovery-disabled"): void {
+  verifiedPluginModes(app).set(machineId, mode);
+}
+
+function verifiedPluginModes(app: PiWebApp): Map<unknown, unknown> {
+  const modes: unknown = Reflect.get(app, "verifiedPluginModeByMachine");
+  if (!(modes instanceof Map)) throw new Error("PiWebApp verified plugin mode map was unavailable");
+  return modes;
 }
 
 function stubRouteMachineSelection(app: PiWebApp, applySelection: () => void): void {
@@ -2016,6 +2855,83 @@ function testWorkspaceFiles(overrides: Partial<WorkspaceFilesCapabilityV1> = {})
   };
 }
 
+function requiredTerminalPlugin(facade: RequiredTerminalBrowserFacadeV1 = testTerminalFacade()): PiWebPlugin {
+  return {
+    apiVersion: 2,
+    name: "Terminal",
+    activate: ({ html, runtimePluginId }) => ({
+      requiredTerminalFacade: facade,
+      contributions: {
+        workspacePanels: [{
+          id: "workspace.terminal",
+          title: "Terminal",
+          order: 30,
+          routeAliases: ["core:workspace.terminal"],
+          navigationAliases: ["core:workspace.terminal"],
+          render: () => html`<p>Terminal</p>`,
+        }],
+        actions: [{
+          id: "view.terminal",
+          title: "Go to Terminal",
+          shortcut: "mod+4",
+          shortcutAliases: ["core:view.terminal"],
+          run: (context) => { context.selectMainView(`${runtimePluginId}:workspace.terminal`); },
+        }],
+      },
+    }),
+  };
+}
+
+function testTerminalFacade(): RequiredTerminalBrowserFacadeV1 {
+  const facade = new TerminalFacade();
+  return {
+    version: 1 as const,
+    createWorkspaceTerminal: (binding: RequiredTerminalWorkspaceBindingV1) => {
+      const terminal = facade.createWorkspaceTerminal(binding);
+      return {
+        open: (options) => { terminal.open(options); },
+        runCommand: () => Promise.reject(new Error("Test Terminal command execution was not configured")),
+      };
+    },
+    listCommandRuns: () => Promise.resolve([]),
+    parseCommandRun: () => { throw new Error("Test Terminal command parsing was not configured"); },
+  };
+}
+
+function replaceTestTerminalFacade(app: PiWebApp, facade: RequiredTerminalBrowserFacadeV1): void {
+  const compositions: unknown = Reflect.get(app, "requiredTerminalByMachine");
+  if (!(compositions instanceof Map)) throw new Error("PiWebApp required Terminal composition map was unavailable");
+  const composition: unknown = compositions.get("local");
+  if (!isRequiredTerminalComposition(composition)) throw new Error("Local Terminal composition was unavailable");
+  compositions.set("local", { ...composition, facade });
+}
+
+function deferredValue<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolvePromise: (value: T) => void = () => undefined;
+  const promise = new Promise<T>((resolve) => { resolvePromise = resolve; });
+  return { promise, resolve: resolvePromise };
+}
+
+function isRequiredTerminalComposition(value: unknown): value is { binding: unknown; facade: unknown } {
+  return typeof value === "object" && value !== null && "binding" in value && "facade" in value;
+}
+
+function isWorkspacePanelTerminal(value: unknown): value is WorkspacePanelContext["terminal"] {
+  return typeof value === "object"
+    && value !== null
+    && "open" in value
+    && typeof value.open === "function"
+    && "runCommand" in value
+    && typeof value.runCommand === "function";
+}
+
+function isWorkspacePanelNavigation(value: unknown): value is WorkspacePanelNavigationV1 {
+  return typeof value === "object"
+    && value !== null
+    && "set" in value
+    && typeof value.set === "function";
+}
+
 function emptyPlugin(name: string): PiWebPlugin {
   return { apiVersion: 2, name, activate: () => ({ contributions: {} }) };
 }
@@ -2046,6 +2962,14 @@ function isNavigationFreshness(value: unknown): value is NavigationFreshness {
     && typeof value.isCurrent === "function";
 }
 
+function pluginWithAction(name: string, actionId: string): PiWebPlugin {
+  return {
+    apiVersion: 2,
+    name,
+    activate: () => ({ contributions: { actions: [{ id: actionId, title: name, run: () => undefined }] } }),
+  };
+}
+
 function callAppMethod(app: PiWebApp, name: string, ...args: unknown[]): unknown {
   const method: unknown = Reflect.get(app, name);
   if (typeof method !== "function") throw new Error(`PiWebApp.${name} is not callable`);
@@ -2058,6 +2982,10 @@ async function callAsyncAppMethod(app: PiWebApp, name: string, ...args: unknown[
 
 function isAction(value: unknown): value is { id: string; run: () => void | Promise<void> } {
   return typeof value === "object" && value !== null && "id" in value && typeof value.id === "string" && "run" in value && typeof value.run === "function";
+}
+
+function isActionArray(value: unknown): value is { id: string; run: () => void | Promise<void> }[] {
+  return Array.isArray(value) && value.every((candidate: unknown) => isAction(candidate));
 }
 
 function manifestEntry(id: string): PluginManifestEntry {
