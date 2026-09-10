@@ -9,6 +9,11 @@ import type { WorkspaceFilesCapabilityV1, WorkspacePanelContext as PublicWorkspa
 import type { Machine, Project, SessionInfo, TerminalCommandRun, Workspace } from "../api";
 import { machineScopedBundledPluginId } from "../../../shared/machinePluginIds";
 import { initialAppState } from "../appState";
+import { loadCachedNewSessions, markCachedNewSessionInfo, rememberCachedNewSession } from "../cachedNewSessions";
+import { loadDraft, saveDraft } from "../promptDraftStorage";
+import { clearStagedAttachments, loadStagedAttachments, saveStagedAttachments, type PendingAttachment } from "../promptAttachmentStaging";
+import { api as defaultApi } from "../api";
+import { machineSessionKey } from "../machineKeys";
 import { browserErrorScopeKey, machineBrowserErrorScope, workspaceBrowserErrorScope } from "../browserErrors";
 import type { MachineNavigationSnapshot } from "../controllers/machineNavigationMemory";
 import type { NavigationFreshness, NavigationScope } from "../controllers/types";
@@ -487,6 +492,93 @@ describe("PiWebApp plugin host", () => {
     expect(appState(app).selectedSession).toBeUndefined();
     expect(browser.url.searchParams.has("session")).toBe(false);
     expect(browser.url.searchParams.get("view")).toBe(TERMINAL_PANEL_ID);
+  });
+
+  it.each(["view", "tool", "session", "workspace"] as const)("reconciles cached recreation through the host guard after a newer %s destination", async (change) => {
+    const cached = markCachedNewSessionInfo({ id: "cached-missing", cwd: workspace.path, path: "/repo/cached-missing", created: "now", modified: "now", messageCount: 0, firstMessage: "" });
+    const replacement: SessionInfo = { ...cached, id: "cached-replacement", path: "/repo/cached-replacement" };
+    const initialTool = change === "tool" ? undefined : TERMINAL_PANEL_ID;
+    const browser = installBrowserWindow(`http://localhost/app?project=project-1&workspace=workspace-1&session=${cached.id}${initialTool === undefined ? "" : `&tool=${encodeURIComponent(initialTool)}`}&view=chat`);
+    const app = new PiWebApp();
+    installTestTerminalComposition(app, "local");
+    markPluginLoadingReady(app);
+    setAppState(app, { ...initialAppState(), projects: [project], selectedProject: project, workspaces: [workspace], selectedWorkspace: workspace, sessions: [cached], workspaceTool: initialTool, mainView: "chat" });
+    vi.spyOn(app, "requestUpdate").mockImplementation(() => undefined);
+    const sessions: unknown = Reflect.get(app, "sessions");
+    if (!(sessions instanceof SessionController)) throw new Error("Missing session controller");
+    const creation = deferred<SessionInfo>();
+    const startSession = vi.fn(() => creation.promise);
+    const connectedSessionIds: string[] = [];
+    const socket: SessionEventSocket = { connect: (session) => { connectedSessionIds.push(session.id); }, setHandler: () => undefined, close: () => undefined };
+    const sessionKey = (id: string) => machineSessionKey("local", id);
+    if (!Reflect.set(sessions, "socket", socket)
+      || !Reflect.set(sessions, "notifications", undefined)
+      || !Reflect.set(sessions, "api", {
+        ...defaultApi,
+        startSession,
+        messages: (session: Parameters<typeof defaultApi.messages>[0]) => session.id === cached.id
+          ? Promise.reject(new Error("Session not found")) : Promise.resolve({ messages: [], start: 0, total: 0 }),
+        status: () => Promise.resolve({ sessionId: replacement.id, isStreaming: false, isCompacting: false, isBashRunning: false, pendingMessageCount: 0, queuedMessages: [], tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
+        streamSnapshot: () => Promise.resolve({ seq: 0, partial: null }),
+        thinkingLevels: () => Promise.resolve({ levels: [] }),
+      })) throw new Error("Could not stub session boundaries");
+    // Keep the real publication/ownership guard; isolate only destination loading
+    // to the controller so this test needs no workspace/network bootstrap.
+    const restore = vi.fn(async () => {
+      expect(browser.url.searchParams.get("session")).toBe(replacement.id);
+      const target = appState(app).sessions[0];
+      if (target === undefined) throw new Error("Missing replacement session");
+      await sessions.selectSession(target, { updateUrl: false });
+    });
+    if (!Reflect.set(app, "restoreRouteFor", restore)) throw new Error("Could not stub destination loading");
+    rememberCachedNewSession(cached);
+    saveDraft(sessionKey(cached.id), "carried draft");
+    const attachment: PendingAttachment = { id: "recreation-file", kind: "file", name: "notes.txt", mimeType: "text/plain", data: "aGk=", size: 2 };
+    saveStagedAttachments(sessionKey(cached.id), [attachment]);
+    try {
+      const selecting = sessions.selectSession(cached, { updateUrl: false });
+      await vi.waitFor(() => { expect(startSession).toHaveBeenCalledOnce(); });
+      if (change === "view") callAppMethod(app, "selectMainView", TERMINAL_PANEL_ID);
+      else if (change === "tool") callAppMethod(app, "publishWorkspaceTool", TERMINAL_PANEL_ID);
+      else {
+        const destination = new URL(browser.url);
+        destination.searchParams.set(change, `newer-${change}`);
+        browser.navigate(destination.href);
+      }
+      const latest = new URL(browser.url);
+      if (change === "view" || change === "tool") {
+        expect(latest.searchParams.get("view")).toBe(TERMINAL_PANEL_ID);
+        expect(latest.searchParams.get("tool")).toBe(TERMINAL_PANEL_ID);
+      }
+      creation.resolve(replacement);
+      await selecting;
+
+      expect(appState(app).sessions.map((session) => session.id)).toEqual([replacement.id]);
+      expect(loadCachedNewSessions().map((session) => session.id)).toEqual([replacement.id]);
+      expect(loadDraft(sessionKey(cached.id))).toBe("");
+      expect(loadDraft(sessionKey(replacement.id))).toBe("carried draft");
+      expect(loadStagedAttachments(sessionKey(cached.id))).toEqual([]);
+      expect(loadStagedAttachments(sessionKey(replacement.id))).toEqual([attachment]);
+      if (change === "view" || change === "tool") {
+        expect(restore).toHaveBeenCalledOnce();
+        expect(browser.url.searchParams.get("session")).toBe(replacement.id);
+        expect(appState(app).selectedSession?.id).toBe(replacement.id);
+        expect(appState(app).mainView).toBe(TERMINAL_PANEL_ID);
+        expect(appState(app).workspaceTool).toBe(TERMINAL_PANEL_ID);
+        expect(appState(app).error).toBe("");
+        expect(connectedSessionIds).toEqual([cached.id, replacement.id]);
+        expect(browser.url.searchParams.get("tool")).toBe(latest.searchParams.get("tool"));
+        expect(browser.url.searchParams.get("view")).toBe(latest.searchParams.get("view"));
+      } else {
+        expect(restore).not.toHaveBeenCalled();
+        expect(browser.url.href).toBe(latest.href);
+        expect(appState(app).selectedSession).toBeUndefined();
+      }
+    } finally {
+      sessions.dispose();
+      clearStagedAttachments(sessionKey(cached.id));
+      clearStagedAttachments(sessionKey(replacement.id));
+    }
   });
 
   it("does not focus a selection after a newer main-view navigation", async () => {

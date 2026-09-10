@@ -1717,9 +1717,13 @@ export class SessionController {
       const wasSelected = this.getState().selectedSession?.id === session.id;
       this.setState({ sessions: [cachedReplacement, ...this.getState().sessions.filter((candidate) => candidate.id !== session.id)], error: "" });
       if (wasSelected && this.navigateToSession !== undefined) {
+        // Surface-only navigation retains this selection load. Carry its latest
+        // surface, but keep the initiating hierarchy/session expectation so the
+        // host still rejects a genuinely newer selection destination.
+        const latest = this.navigationSelection();
         const accepted = await this.navigateToSession(cachedReplacement, {
           ...(options?.updateUrl === false ? { replace: true } : {}),
-          expected,
+          expected: { ...expected, tool: latest.tool, view: latest.view },
         });
         // The replacement is durable, but rejected navigation does not grant
         // permission to select it or rewrite the newer URL. Retire only our
