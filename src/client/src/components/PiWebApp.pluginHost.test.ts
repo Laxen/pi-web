@@ -1388,7 +1388,7 @@ describe("PiWebApp plugin host", () => {
     });
   });
 
-  it("rejects a retained panel setter after its own contribution query changes", () => {
+  it("keeps Terminal selection unchanged when the real host rejects a retained panel setter", () => {
     const browser = installBrowserWindow(`http://localhost/app?project=project-1&workspace=workspace-1&tool=${encodeURIComponent(TERMINAL_PANEL_ID)}&view=${encodeURIComponent(TERMINAL_PANEL_ID)}&pi-web.terminal.workspace.terminal--terminal=terminal-old`);
     const app = new PiWebApp();
     setAppState(app, {
@@ -1412,12 +1412,20 @@ describe("PiWebApp plugin host", () => {
     );
     if (!isWorkspacePanelNavigation(navigation)) throw new Error("Workspace panel navigation was unavailable");
 
-    navigation.set("terminal", "terminal-current");
+    const runtime = new TerminalBrowserRuntime(new InMemoryTerminalSelectionMemory());
+    const { machine, workspace: boundWorkspace, files, host, prompt, terminal } = workspacePanelContextFromApp(app);
+    const context: PublicWorkspacePanelContext = { machine, workspace: boundWorkspace, files, host, prompt, terminal, navigation };
+    const selectionScope = runtime.selectionScope(context);
+
+    expect(runtime.selectTerminal(context, "terminal-current")).toBe(true);
+    expect(runtime.selection.latestTerminalId(selectionScope)).toBe("terminal-current");
     expect(browser.url.searchParams.get("pi-web.terminal.workspace.terminal--terminal")).toBe("terminal-current");
 
     browser.navigate(`http://localhost/app?project=project-1&workspace=workspace-1&tool=${encodeURIComponent(TERMINAL_PANEL_ID)}&view=${encodeURIComponent(TERMINAL_PANEL_ID)}&pi-web.terminal.workspace.terminal--terminal=terminal-newer`);
-    navigation.set("terminal", "terminal-stale");
+    expect(runtime.selectTerminal(context, "terminal-stale")).toBe(false);
+    expect(runtime.selectTerminal(context, undefined)).toBe(false);
 
+    expect(runtime.selection.latestTerminalId(selectionScope)).toBe("terminal-current");
     expect(browser.url.searchParams.get("pi-web.terminal.workspace.terminal--terminal")).toBe("terminal-newer");
   });
 
