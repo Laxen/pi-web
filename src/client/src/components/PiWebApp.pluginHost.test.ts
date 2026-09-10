@@ -202,6 +202,47 @@ describe("PiWebApp plugin host", () => {
     expect(appState(app).selectedWorkspace?.id).toBe(nextWorkspace.id);
   });
 
+  it("keeps the loaded workspace list visible while a committed workspace route resolves sessions", async () => {
+    const previousWorkspace: Workspace = { id: "workspace-old", projectId: project.id, path: "/repo", label: "Old", isMain: true, effectiveConfig: {} };
+    const nextWorkspace: Workspace = { id: "workspace-next", projectId: project.id, path: "/repo-next", label: "Next", isMain: false, effectiveConfig: {} };
+    const loadedWorkspaces = [previousWorkspace, nextWorkspace];
+    const browser = installBrowserWindow(`http://localhost/app?project=${project.id}&workspace=${previousWorkspace.id}&view=chat`);
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(),
+      projects: [project],
+      selectedProject: project,
+      workspaces: loadedWorkspaces,
+      selectedWorkspace: previousWorkspace,
+      workspaceTool: TERMINAL_PANEL_ID,
+      mainView: "chat",
+    });
+    markPluginLoadingReady(app);
+
+    const workspaceReload = deferred<Workspace[]>();
+    const sessionLoad = deferred<SessionInfo[]>();
+    const loadWorkspaces = vi.fn().mockReturnValue(workspaceReload.promise);
+    const loadSessions = vi.fn().mockReturnValue(sessionLoad.promise);
+    const controller: unknown = Reflect.get(app, "workspaces");
+    if (typeof controller !== "object" || controller === null) throw new Error("PiWebApp workspace controller was unavailable");
+    if (!Reflect.set(controller, "api", { workspaces: loadWorkspaces, sessions: loadSessions })) throw new Error("Could not stub workspace APIs");
+
+    const selection = callAsyncAppMethod(app, "selectWorkspaceFromNavigation", nextWorkspace);
+    await vi.waitFor(() => {
+      expect(loadWorkspaces.mock.calls.length + loadSessions.mock.calls.length).toBeGreaterThan(0);
+    });
+
+    expect(browser.url.searchParams.get("workspace")).toBe(nextWorkspace.id);
+    expect(loadWorkspaces).not.toHaveBeenCalled();
+    expect(loadSessions).toHaveBeenCalledWith(nextWorkspace.path, "local");
+    expect(appState(app).workspaces).toBe(loadedWorkspaces);
+    expect(appState(app).selectedWorkspace).toBe(nextWorkspace);
+    expect(appState(app).isLoadingWorkspaces).toBe(false);
+
+    sessionLoad.resolve([]);
+    await selection;
+  });
+
   it("publishes a session destination before asynchronous transcript reconciliation", async () => {
     const project: Project = { id: "project-1", name: "Project", path: "/repo", createdAt: "now" };
     const workspace: Workspace = { id: "workspace-1", projectId: project.id, path: "/repo", label: "Main", isMain: true, effectiveConfig: {} };
@@ -239,6 +280,59 @@ describe("PiWebApp plugin host", () => {
     expect(browser.url.searchParams.get("session")).toBe(nextSession.id);
     expect(browser.url.searchParams.get("core.workspace.terminal--terminal")).toBe("terminal-1");
     expect(appState(app).selectedSession?.id).toBe(nextSession.id);
+  });
+
+  it("keeps the loaded session list visible while a committed session route reconciles", async () => {
+    const previousSession: SessionInfo = { id: "session-old", cwd: workspace.path, path: "/repo/.sessions/session-old", created: "now", modified: "now", messageCount: 0, firstMessage: "" };
+    const nextSession: SessionInfo = { id: "session-next", cwd: workspace.path, path: "/repo/.sessions/session-next", created: "now", modified: "now", messageCount: 0, firstMessage: "" };
+    const loadedSessions = [previousSession, nextSession];
+    const browser = installBrowserWindow(`http://localhost/app?project=${project.id}&workspace=${workspace.id}&session=${previousSession.id}&view=chat`);
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(),
+      projects: [project],
+      selectedProject: project,
+      workspaces: [workspace],
+      selectedWorkspace: workspace,
+      sessions: loadedSessions,
+      selectedSession: previousSession,
+      workspaceTool: TERMINAL_PANEL_ID,
+      mainView: "chat",
+    });
+    markPluginLoadingReady(app);
+
+    const sessionListReload = deferred<SessionInfo[]>();
+    const loadWorkspaces = vi.fn().mockResolvedValue([workspace]);
+    const loadSessions = vi.fn().mockReturnValue(sessionListReload.promise);
+    const workspaceController: unknown = Reflect.get(app, "workspaces");
+    if (typeof workspaceController !== "object" || workspaceController === null) throw new Error("PiWebApp workspace controller was unavailable");
+    if (!Reflect.set(workspaceController, "api", { workspaces: loadWorkspaces, sessions: loadSessions })) throw new Error("Could not stub workspace APIs");
+
+    const selectedSessionRefresh = deferred<undefined>();
+    const sessionController: unknown = Reflect.get(app, "sessions");
+    if (!(sessionController instanceof SessionController)) throw new Error("PiWebApp session controller was unavailable");
+    const selectSession = vi.spyOn(sessionController, "selectSession").mockImplementation(async (session) => {
+      callAppMethod(app, "setState", { selectedSession: session });
+      await selectedSessionRefresh.promise;
+    });
+
+    const selection = callAsyncAppMethod(app, "selectSessionFromNavigation", nextSession);
+    await vi.waitFor(() => {
+      expect(loadSessions.mock.calls.length + selectSession.mock.calls.length).toBeGreaterThan(0);
+    });
+
+    expect(browser.url.searchParams.get("session")).toBe(nextSession.id);
+    expect(loadWorkspaces).not.toHaveBeenCalled();
+    expect(loadSessions).not.toHaveBeenCalled();
+    expect(selectSession).toHaveBeenCalledTimes(1);
+    expect(selectSession.mock.calls[0]?.[0]).toBe(nextSession);
+    expect(selectSession.mock.calls[0]?.[1]?.updateUrl).toBe(false);
+    expect(selectSession.mock.calls[0]?.[1]?.navigation).toBeDefined();
+    expect(appState(app).sessions).toBe(loadedSessions);
+    expect(appState(app).selectedSession).toBe(nextSession);
+
+    selectedSessionRefresh.resolve(undefined);
+    await selection;
   });
 
   it("publishes Chat before starting a session from another workspace view", async () => {

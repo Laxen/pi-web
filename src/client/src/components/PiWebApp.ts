@@ -728,7 +728,28 @@ export class PiWebApp extends LitElement {
         });
         return;
       }
-      await this.workspaces.selectProject(project, { workspaceId: route.workspaceId, sessionId: route.sessionId, updateUrl: false, navigation });
+      const loadedWorkspace = urlPublication === "deferred"
+        && this.state.selectedProject?.id === project.id
+        && route.workspaceId !== undefined
+        ? this.state.workspaces.find((workspace) => workspace.projectId === project.id && workspace.id === route.workspaceId)
+        : undefined;
+      const loadedSession = loadedWorkspace !== undefined
+        && this.state.selectedWorkspace?.projectId === loadedWorkspace.projectId
+        && this.state.selectedWorkspace.id === loadedWorkspace.id
+        && route.sessionId !== undefined
+        ? this.sessions.preferredSession(loadedWorkspace.path, this.state.sessions, route.sessionId)
+        : undefined;
+      // In-app navigation published this known destination before reconciliation.
+      // Re-enter at the deepest loaded parent instead of blanking and relisting its
+      // unchanged ancestors. Current-URL restores still validate through their
+      // normal workspace and session listing requests.
+      if (loadedSession !== undefined) {
+        await this.sessions.selectSession(loadedSession, { updateUrl: false, navigation });
+      } else if (loadedWorkspace !== undefined) {
+        await this.workspaces.selectWorkspace(loadedWorkspace, { sessionId: route.sessionId, updateUrl: false, navigation });
+      } else {
+        await this.workspaces.selectProject(project, { workspaceId: route.workspaceId, sessionId: route.sessionId, updateUrl: false, navigation });
+      }
       if (!this.isCurrentRouteRestore(restoreSeq, navigation)) return;
       await this.finishWorkspaceRouteRestore(routeSurface, finishOptions);
     } finally {
