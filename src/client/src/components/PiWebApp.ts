@@ -2218,6 +2218,7 @@ export class PiWebApp extends LitElement {
   }
 
   private async loadPluginsForMachine(machine: Machine): Promise<void> {
+    const urlAtLoad = currentBrowserUrl();
     await this.ensureGatewayPluginsLoaded();
     if (machine.kind !== "remote" || this.loadedMachinePluginIds.has(machine.id)) return;
     const runtime = this.state.machineRuntimes[machine.id];
@@ -2226,8 +2227,7 @@ export class PiWebApp extends LitElement {
       console.warn(message);
       this.verifiedPluginModeByMachine.delete(machine.id);
       this.clearRequiredTerminal(machine.id);
-      const selectionChanged = this.reconcileWorkspacePanelSelection();
-      if (selectionChanged && !this.routeRestoreInProgress) this.updateUrl({ replace: true });
+      this.reconcilePluginLoadSelection(urlAtLoad);
       this.setRequiredPluginFailure(machine.id, message);
       return;
     }
@@ -2247,7 +2247,7 @@ export class PiWebApp extends LitElement {
   }
 
   private async registerExternalPlugins(label: string, load: () => Promise<ExternalPluginLoadResult>, machineId = "local"): Promise<boolean> {
-    const routeAtLoad = readRoute();
+    const urlAtLoad = currentBrowserUrl();
     try {
       const result = await load();
       if (result.terminalMode === "recovery-disabled") {
@@ -2265,8 +2265,7 @@ export class PiWebApp extends LitElement {
       if (requiredTerminalLoadFailure !== undefined) {
         this.verifiedPluginModeByMachine.delete(machineId);
         this.clearRequiredTerminal(machineId);
-        const selectionChanged = this.reconcileWorkspacePanelSelection();
-        if (selectionChanged && !this.routeRestoreInProgress) this.updateUrl({ replace: true });
+        this.reconcilePluginLoadSelection(urlAtLoad);
         this.applyPreferredTheme(false);
         this.setRequiredPluginFailure(machineId, `Required Terminal plugin failed to load: ${errorMessage(requiredTerminalLoadFailure.error)}. Open Settings for recovery guidance.`);
         this.requestUpdate();
@@ -2324,11 +2323,7 @@ export class PiWebApp extends LitElement {
         this.verifiedPluginModeByMachine.set(machineId, "required");
         this.clearRequiredPluginFailure(machineId);
       }
-      const selectionChanged = this.reconcileWorkspacePanelSelection();
-      if (selectionChanged
-        && !this.routeRestoreInProgress
-        && this.routeLocationMatchesUrl(routeAtLoad)
-        && this.navigationSelectionMatchesUrl(navigationSelectionFromState(this.state))) this.updateUrl({ replace: true });
+      this.reconcilePluginLoadSelection(urlAtLoad);
       this.applyPreferredTheme(false);
       this.requestUpdate();
       return complete;
@@ -2336,13 +2331,20 @@ export class PiWebApp extends LitElement {
       console.warn(`Failed to load ${label}`, error);
       this.verifiedPluginModeByMachine.delete(machineId);
       this.clearRequiredTerminal(machineId);
-      const selectionChanged = this.reconcileWorkspacePanelSelection();
-      if (selectionChanged && !this.routeRestoreInProgress) this.updateUrl({ replace: true });
+      this.reconcilePluginLoadSelection(urlAtLoad);
       this.applyPreferredTheme(false);
       this.setRequiredPluginFailure(machineId, `Failed to load ${label}: ${errorMessage(error)}`);
       this.requestUpdate();
       return false;
     }
+  }
+
+  private reconcilePluginLoadSelection(urlAtLoad: string): void {
+    // Check before reconciling: even a fallback's local surface change belongs
+    // to the initiating destination, including its contribution query.
+    if (currentBrowserUrl() !== urlAtLoad) return;
+    const selectionChanged = this.reconcileWorkspacePanelSelection();
+    if (selectionChanged && !this.routeRestoreInProgress) this.updateUrl({ replace: true });
   }
 
   private setRequiredPluginFailure(machineId: string, message: string): void {

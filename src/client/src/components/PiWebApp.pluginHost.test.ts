@@ -2043,6 +2043,75 @@ describe("PiWebApp plugin host", () => {
     expect(browser.url.searchParams.get("view")).toBe("core:workspace.terminal");
   });
 
+  describe.each(["rejection", "required-terminal", "capability"] as const)("plugin load %s ownership", (failureKind) => {
+    it.each(["current", "tool", "view", "query"] as const)("preserves failure reporting for a %s destination", async (navigation) => {
+      const machine = failureKind === "capability" ? remoteMachine : undefined;
+      const initialUrl = new URL("http://localhost/app?project=project-1&workspace=workspace-1");
+      if (machine !== undefined) initialUrl.searchParams.set("machine", machine.id);
+      initialUrl.searchParams.set("tool", TERMINAL_PANEL_ID);
+      initialUrl.searchParams.set("view", TERMINAL_PANEL_ID);
+      const browser = installBrowserWindow(initialUrl.href);
+      const app = new PiWebApp();
+      stubPluginLoadRendering(app);
+      const state: ReturnType<typeof initialAppState> = {
+        ...initialAppState(),
+        selectedMachine: machine,
+        selectedProject: project,
+        selectedWorkspace: workspace,
+        workspaces: [workspace],
+        workspaceTool: TERMINAL_PANEL_ID,
+        mainView: TERMINAL_PANEL_ID,
+        machineRuntimes: machine === undefined ? {} : {
+          [machine.id]: { machineId: machine.id, ok: true, checkedAt: "now", capabilities: [] },
+        },
+      };
+      setAppState(app, state);
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      let finish!: () => void;
+      let pending: unknown;
+      if (machine !== undefined) {
+        const gateway = new Promise<void>((resolve) => { finish = resolve; });
+        Reflect.set(app, "gatewayPluginLoadPromise", gateway);
+        pending = callAppMethod(app, "loadPluginsForMachine", machine);
+      } else {
+        const load = new Promise<Awaited<ReturnType<typeof loadExternalPlugins>>>((resolve, reject) => {
+          finish = () => {
+            if (failureKind === "rejection") reject(new Error("module unavailable"));
+            else resolve({
+              terminalMode: "required", registrations: [],
+              failures: [{ entry: manifestEntry("pi-web.terminal"), error: new Error("module unavailable") }],
+            });
+          };
+        });
+        pending = callAppMethod(app, "registerExternalPlugins", "test plugins", () => load);
+      }
+      const destination = new URL(initialUrl);
+      if (navigation === "tool") destination.searchParams.set("tool", "new:panel");
+      if (navigation === "view") destination.searchParams.set("view", "new:panel");
+      if (navigation === "query") destination.searchParams.set("terminal", "new-terminal");
+      browser.navigate(destination.href);
+      const destinationUrl = browser.url.href;
+      const selectedSurface: Pick<ReturnType<typeof initialAppState>, "workspaceTool" | "mainView"> = {
+        workspaceTool: navigation === "tool" ? "new:panel" : TERMINAL_PANEL_ID,
+        mainView: navigation === "view" ? "new:panel" : TERMINAL_PANEL_ID,
+      };
+      setAppState(app, { ...state, ...selectedSurface });
+      finish();
+      await pending;
+
+      expect(warning).toHaveBeenCalled();
+      expect(displayedError(app)).toContain(machine === undefined ? "module unavailable" : "plugin lifecycle capability");
+      if (navigation === "current") {
+        expect(appState(app).mainView).toBe("chat");
+        expect(browser.url.searchParams.get("view")).toBe("chat");
+        expect(browser.url.href).not.toBe(destinationUrl);
+      } else {
+        expect(browser.url.href).toBe(destinationUrl);
+        expect(appState(app)).toMatchObject(selectedSurface);
+      }
+    });
+  });
+
   it("keeps successful registrations while making an incomplete gateway load retryable", async () => {
     const app = createApp();
     stubPluginLoadRendering(app);
