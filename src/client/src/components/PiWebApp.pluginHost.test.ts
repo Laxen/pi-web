@@ -848,7 +848,14 @@ describe("PiWebApp plugin host", () => {
     }, false, {});
     await vi.waitFor(() => { expect(waiting).toBe(true); });
     const bufferedEvent: SessionUiEvent = { type: "status.update", status: { ...status, cost: 2 } };
-    if (phase === "refresh") handler?.(bufferedEvent);
+    if (phase === "refresh") {
+      handler?.(bufferedEvent);
+      // An identical restore can reuse a selected session whose join is still
+      // pending; it must not retire that join without starting a replacement.
+      await callAsyncAppMethod(app, "restoreRouteFor", {
+        projectId: "project-1", workspaceId: "workspace-1", sessionId: session.id, view: "chat",
+      }, false, {});
+    }
     // Publish a surface-only destination while the hierarchy is still partial.
     // Keep every selection field unchanged so this tests selection freshness,
     // rather than a separate navigation intent derived from partial UI state.
@@ -936,6 +943,48 @@ describe("PiWebApp plugin host", () => {
     expect(appState(app).selectedWorkspace?.id).toBe(secondWorkspace.id);
     expect(browser.url.searchParams.get("project")).toBe(secondProject.id);
     expect(browser.url.searchParams.get("workspace")).toBe(secondWorkspace.id);
+  });
+
+  it.each(["workspaces", "sessions"] as const)("keeps the newer identical-route restore's %s response", async (phase) => {
+    const project: Project = { id: "project", name: "Project", path: "/repo", createdAt: "now" };
+    const workspace: Workspace = { id: "workspace", projectId: project.id, path: "/repo", label: "Current", isMain: true, effectiveConfig: {} };
+    const browser = installBrowserWindow(`http://localhost/app?project=${project.id}&workspace=${workspace.id}&session=missing&view=chat`);
+    const app = new PiWebApp();
+    setAppState(app, { ...initialAppState(), projects: [project] });
+    markPluginLoadingReady(app);
+    if (!Reflect.set(app, "refreshWorkspaceDeletionRuns", () => Promise.resolve())) throw new Error("Could not stub workspace deletion refresh");
+    const oldWorkspaces = deferred<Workspace[]>();
+    const newWorkspaces = deferred<Workspace[]>();
+    const oldSessions = deferred<SessionInfo[]>();
+    const newSessions = deferred<SessionInfo[]>();
+    const loadWorkspaces = phase === "workspaces"
+      ? vi.fn().mockReturnValueOnce(oldWorkspaces.promise).mockReturnValueOnce(newWorkspaces.promise)
+      : vi.fn().mockResolvedValue([workspace]);
+    const loadSessions = phase === "sessions"
+      ? vi.fn().mockReturnValueOnce(oldSessions.promise).mockReturnValueOnce(newSessions.promise)
+      : vi.fn().mockResolvedValue([]);
+    const controller: unknown = Reflect.get(app, "workspaces");
+    if (typeof controller !== "object" || controller === null) throw new Error("Workspace controller unavailable");
+    if (!Reflect.set(controller, "api", { workspaces: loadWorkspaces, sessions: loadSessions })) throw new Error("Could not stub workspace APIs");
+    const route = { projectId: project.id, workspaceId: workspace.id, sessionId: "missing", view: "chat" };
+    const first = callAsyncAppMethod(app, "restoreRouteFor", route, false, {}, undefined, "deferred");
+    const pendingLoad = phase === "workspaces" ? loadWorkspaces : loadSessions;
+    await vi.waitFor(() => { expect(pendingLoad).toHaveBeenCalledTimes(1); });
+    const second = callAsyncAppMethod(app, "restoreRouteFor", route, false, {}, undefined, "deferred");
+    await vi.waitFor(() => { expect(pendingLoad).toHaveBeenCalledTimes(2); });
+    newWorkspaces.resolve([workspace]);
+    newSessions.resolve([]);
+    await second;
+    const destination = browser.url.href;
+    oldWorkspaces.resolve([{ ...workspace, label: "Obsolete" }]);
+    // An empty newer listing must not be replaced by a stale listing. The explicit
+    // missing session target avoids opening a session as a side effect of this test.
+    oldSessions.resolve([{ id: "obsolete", cwd: workspace.path, path: "/repo/obsolete", created: "now", modified: "now", messageCount: 0, firstMessage: "" }]);
+    await first;
+    expect(appState(app).workspaces).toEqual([workspace]);
+    expect(appState(app).selectedWorkspace).toEqual(workspace);
+    expect(appState(app).sessions).toEqual([]);
+    expect(browser.url.href).toBe(destination);
   });
 
   it("does not hand a stale bootstrap route to reconciliation after project loading", async () => {

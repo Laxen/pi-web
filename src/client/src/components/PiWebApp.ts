@@ -284,6 +284,7 @@ export class PiWebApp extends LitElement {
   private navigationSelectionSeq = 0;
   private modelDialogInstanceId = 0;
   private routeRestoreSeq = 0;
+  private routeSelectionRestoreSeq = 0;
   private navigationGeneration = 0;
   private observedNavigationRoute: ParsedAppRoute | undefined;
   private readonly navigationFieldGenerations: Record<NavigationScope, number> = {
@@ -669,7 +670,17 @@ export class PiWebApp extends LitElement {
     const machineBeforeRestore = selectedMachineId(this.state);
     const routeSurface = parsedRoute.projectId === undefined || parsedRoute.projectId === "" ? emptyWorkspaceRouteSurface() : surface;
     const navigation = this.beginNavigationOperation(ROUTE_RESTORE_SCOPE);
-    const selectionNavigation = this.beginNavigationOperation(ROUTE_SELECTION_SCOPE);
+    const selectionFreshness = this.beginNavigationOperation(ROUTE_SELECTION_SCOPE);
+    // A matching selection reuses its existing join (which may still be loading).
+    // Only a restore that needs selection work supersedes that work's owner.
+    if (!this.routeMatchesCurrentSelection(parsedRoute)) this.routeSelectionRestoreSeq += 1;
+    const selectionRestoreSeq = this.routeSelectionRestoreSeq;
+    // Keep selection ordering separate from finalization, which surface-only
+    // navigation may retire even while the same selection is still loading.
+    const selectionNavigation: NavigationFreshness = {
+      ...selectionFreshness,
+      isCurrent: () => selectionRestoreSeq === this.routeSelectionRestoreSeq && selectionFreshness.isCurrent(),
+    };
     const restoreSeq = ++this.routeRestoreSeq;
     this.routeRestoreDepth += 1;
     try {
@@ -1015,7 +1026,7 @@ export class PiWebApp extends LitElement {
     return this.state.selectedMachine?.id === routeMachineId;
   }
 
-  private routeMatchesCurrentSelection(route: AppRoute): boolean {
+  private routeMatchesCurrentSelection(route: Pick<AppRoute, "machineId" | "projectId" | "workspaceId" | "sessionId">): boolean {
     return (route.machineId ?? "local") === (this.state.selectedMachine?.id ?? "local")
       && route.workspaceId !== undefined
       && route.workspaceId !== ""
