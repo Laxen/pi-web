@@ -154,6 +154,61 @@ describe("Terminal panel lifecycle", () => {
     expect(setNavigation).toHaveBeenCalledWith("terminal", "terminal-2", { replace: true });
   });
 
+  it("reconciles loaded shell selection when a resolved host context replaces a rejected one", async () => {
+    const panel = createTerminalPanel();
+    const memory = new InMemoryTerminalSelectionMemory();
+    const runtime = new TerminalBrowserRuntime(memory);
+    const request = vi.fn((operation: string): Promise<JsonValue> =>
+      Promise.resolve(operation === "terminal.list" ? [terminalInfo("remembered-shell")] : []));
+    const rejectedNavigation = vi.fn(() => false);
+    const context = terminalContext({
+      pairedBackend: terminalBackend(request),
+      navigation: { ...terminalNavigation(), set: rejectedNavigation },
+    });
+    memory.rememberTerminal(runtime.selectionScope(context), "remembered-shell");
+    panel.context = context;
+    panel.runtime = runtime;
+    Reflect.set(panel, "visible", true);
+    callPanelMethod(panel, "willUpdate");
+    await callAsyncPanelMethod(panel, "loadTerminals");
+    callPanelMethod(panel, "updated");
+    expect(rejectedNavigation).toHaveBeenCalledWith("terminal", "remembered-shell", { replace: true });
+    expect(Reflect.get(panel, "selectedId")).toBeUndefined();
+
+    // Project resolution supplies a fresh setter, but neither the empty query
+    // nor the remembered shell changes. No second list response should be needed.
+    const acceptedNavigation = vi.fn(() => true);
+    panel.context = { ...context, navigation: { ...terminalNavigation(), set: acceptedNavigation } };
+    callPanelMethod(panel, "willUpdate");
+    callPanelMethod(panel, "updated");
+
+    expect(acceptedNavigation).toHaveBeenCalledWith("terminal", "remembered-shell", { replace: true });
+    expect(Reflect.get(panel, "selectedId")).toBe("remembered-shell");
+    expect(request.mock.calls.map(([operation]) => operation)).toEqual(["terminal.list", "terminal.list-runs"]);
+  });
+
+  it("does not reconcile an unselected loaded panel over a pending shell start", async () => {
+    const panel = createTerminalPanel();
+    const create = deferred<JsonValue>();
+    const setNavigation = vi.fn(() => true);
+    const request = vi.fn((operation: string): Promise<JsonValue> => operation === "terminal.create"
+      ? create.promise
+      : Promise.resolve(operation === "terminal.list" ? [terminalInfo("old-shell")] : []));
+    panel.context = terminalContext({ pairedBackend: terminalBackend(request), navigation: { ...terminalNavigation(), set: setNavigation } });
+    panel.runtime = new TerminalBrowserRuntime(new InMemoryTerminalSelectionMemory());
+    Reflect.set(panel, "visible", true);
+    callPanelMethod(panel, "willUpdate");
+    const start = callAsyncPanelMethod(panel, "startTerminal");
+    await callAsyncPanelMethod(panel, "loadTerminals");
+    callPanelMethod(panel, "updated");
+    expect(setNavigation).not.toHaveBeenCalled();
+    expect(Reflect.get(panel, "selectedId")).toBeUndefined();
+
+    create.resolve(terminalInfo("new-shell"));
+    await start;
+    expect(Reflect.get(panel, "selectedId")).toBe("new-shell");
+  });
+
   it("starts an empty panel only for an explicit one-shot open request", async () => {
     const passivePanel = createTerminalPanel();
     const passiveRequest = vi.fn((operation: string): Promise<JsonValue> => {

@@ -200,6 +200,17 @@ export class TerminalPanel extends LitElement {
     if (this.hasPendingCommandRuns()) this.updateCommandRunPolling(true);
     this.loadVisibleWorkspaceTerminals();
     if (this.shouldReloadForRequestedTerminal()) void this.loadTerminals();
+    // A list can settle before the host finishes resolving the workspace URL.
+    // Its selection write is correctly rejected then; reconcile with the latest
+    // context even when the routed/remembered terminal IDs have not changed.
+    if (!this.loading
+      && this.observedWorkspaceScope !== undefined
+      && this.loadedWorkspaceScope === this.observedWorkspaceScope
+      && this.selectedId === undefined
+      && this.terminals.length > 0
+      && this.pendingStartNavigationGeneration !== this.terminalNavigationGeneration) {
+      this.selectPreferredLoadedTerminal({ replaceUrl: true });
+    }
     this.applyAutoStartRequest();
     this.ensureTerminalView();
   }
