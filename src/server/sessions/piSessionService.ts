@@ -472,7 +472,7 @@ export interface PiAgentSession {
     getUIContext(): ExtensionUIContext;
     setUIContext(uiContext?: ExtensionUIContext, mode?: "rpc"): void;
   };
-  promptTemplates: readonly { name: string; description?: string }[];
+  promptTemplates: readonly { name: string; description?: string; argumentHint?: string }[];
   resourceLoader: { getSkills(): { skills: readonly { name: string; description?: string }[] } };
   subscribe(listener: (event: unknown) => void): () => void;
   bindExtensions(bindings: PiExtensionBindings): Promise<void>;
@@ -2437,7 +2437,12 @@ export class PiSessionService implements SessionRouteService {
       commands.push({ name: command.invocationName, ...(command.description === undefined ? {} : { description: command.description }), source: "extension" });
     }
     for (const template of session.promptTemplates) {
-      commands.push({ name: template.name, ...(template.description === undefined ? {} : { description: template.description }), source: "prompt" });
+      commands.push({
+        name: template.name,
+        ...(template.description === undefined ? {} : { description: template.description }),
+        ...(template.argumentHint === undefined ? {} : { argumentHint: template.argumentHint }),
+        source: "prompt",
+      });
     }
     for (const skill of session.resourceLoader.getSkills().skills) {
       commands.push({ name: `skill:${skill.name}`, ...(skill.description === undefined ? {} : { description: skill.description }), source: "skill" });
