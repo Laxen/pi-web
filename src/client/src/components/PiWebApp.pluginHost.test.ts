@@ -12,7 +12,8 @@ import { initialAppState } from "../appState";
 import { browserErrorScopeKey, machineBrowserErrorScope, workspaceBrowserErrorScope } from "../browserErrors";
 import type { MachineNavigationSnapshot } from "../controllers/machineNavigationMemory";
 import type { NavigationFreshness, NavigationScope } from "../controllers/types";
-import { SessionController } from "../controllers/sessionController";
+import { SessionController, type SessionEventSocket } from "../controllers/sessionController";
+import type { SessionUiEvent } from "../sessionSocket";
 import { loadExternalPlugins, type PluginManifestEntry } from "../plugins/external";
 import { PluginRegistry } from "../plugins/registry";
 import type { PiWebPlugin, PluginRuntimeContext, WorkspaceInvalidation, WorkspacePanelContext, WorkspacePanelNavigationV1 } from "../plugins/types";
@@ -715,6 +716,91 @@ describe("PiWebApp plugin host", () => {
     await Promise.all([first, second]);
 
     expect(new URL(window.location.href).searchParams.get("project")).toBe(projectB.id);
+  });
+
+  it.each([
+    { phase: "workspaces", cancelSelection: false },
+    { phase: "sessions", cancelSelection: false },
+    { phase: "refresh", cancelSelection: false },
+    { phase: "refresh", cancelSelection: true },
+  ] as const)("fences pending $phase loading (new selection: $cancelSelection)", async ({ phase, cancelSelection }) => {
+    const session: SessionInfo = { id: "session-1", cwd: workspace.path, path: "/repo/session-1", created: "now", modified: "now", messageCount: 0, firstMessage: "" };
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&session=session-1&view=chat");
+    const app = new PiWebApp();
+    installTestTerminalComposition(app, "local");
+    setAppState(app, { ...initialAppState(), projects: [project], workspaceTool: TERMINAL_PANEL_ID, mainView: "chat" });
+    markPluginLoadingReady(app);
+    vi.spyOn(app, "requestUpdate").mockImplementation(() => undefined);
+    if (!Reflect.set(app, "refreshWorkspaceDeletionRuns", () => Promise.resolve())) throw new Error("Could not stub deletion refresh");
+    const gate = deferred<undefined>();
+    let waiting = false;
+    const waitAt = async (at: typeof phase) => {
+      if (phase !== at) return;
+      waiting = true;
+      await gate.promise;
+    };
+    const workspaces: unknown = Reflect.get(app, "workspaces");
+    if (typeof workspaces !== "object" || workspaces === null) throw new Error("Missing workspace controller");
+    if (!Reflect.set(workspaces, "api", {
+      workspaces: async () => { await waitAt("workspaces"); return [workspace]; },
+      sessions: async () => { await waitAt("sessions"); return [session]; },
+    })) throw new Error("Could not stub workspace API");
+    const sessions: unknown = Reflect.get(app, "sessions");
+    if (!(sessions instanceof SessionController)) throw new Error("Missing session controller");
+    let handler: ((event: SessionUiEvent) => void) | undefined;
+    const setHandler = vi.fn<SessionEventSocket["setHandler"]>((onEvent) => { handler = onEvent; });
+    const socket: SessionEventSocket = {
+      connect: (_session, onEvent) => { handler = onEvent; },
+      setHandler,
+      close: () => { handler = undefined; },
+    };
+    const status = { sessionId: session.id, isStreaming: false, isCompacting: false, isBashRunning: false, pendingMessageCount: 0, queuedMessages: [], tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 };
+    if (!Reflect.set(sessions, "socket", socket)
+      || !Reflect.set(sessions, "notifications", undefined)
+      || !Reflect.set(sessions, "api", {
+        messages: async () => { await waitAt("refresh"); return { messages: [], start: 0, total: 0 }; },
+        status: () => Promise.resolve(status),
+        streamSnapshot: () => Promise.resolve({ seq: 0, partial: null }),
+        thinkingLevels: () => Promise.resolve({ levels: [] }),
+      })) throw new Error("Could not stub session boundaries");
+    const restoring = callAsyncAppMethod(app, "restoreRouteFor", {
+      projectId: project.id, workspaceId: workspace.id, sessionId: session.id, view: "chat",
+    }, false, {});
+    await vi.waitFor(() => { expect(waiting).toBe(true); });
+    const bufferedEvent: SessionUiEvent = { type: "status.update", status: { ...status, cost: 2 } };
+    if (phase === "refresh") handler?.(bufferedEvent);
+    // Publish a surface-only destination while the hierarchy is still partial.
+    // Keep every selection field unchanged so this tests selection freshness,
+    // rather than a separate navigation intent derived from partial UI state.
+    browser.navigate(`${browser.url.href}&tool=${encodeURIComponent(TERMINAL_PANEL_ID)}`.replace("view=chat", `view=${encodeURIComponent(TERMINAL_PANEL_ID)}`));
+    callAppMethod(app, "retireRouteRestoreForSynchronousNavigation");
+    setAppState(app, { ...appState(app), mainView: TERMINAL_PANEL_ID, workspaceTool: TERMINAL_PANEL_ID });
+    if (cancelSelection) browser.navigate(browser.url.href.replace("session=session-1", "session=session-2"));
+    const destination = browser.url.href;
+    gate.resolve(undefined);
+    await restoring;
+
+    if (cancelSelection) {
+      expect(setHandler).not.toHaveBeenCalled();
+      expect(handler).toBeUndefined();
+      expect(appState(app).status).toBeUndefined();
+      expect(browser.url.href).toBe(destination);
+      sessions.dispose();
+      return;
+    }
+    expect(appState(app).workspaces).toEqual([workspace]);
+    expect(appState(app).sessions).toEqual([session]);
+    expect(appState(app).selectedSession?.id).toBe(session.id);
+    expect(appState(app).mainView).toBe(TERMINAL_PANEL_ID);
+    expect(browser.url.href).toBe(destination);
+    expect(setHandler).toHaveBeenCalledOnce();
+    sessions.flushPendingUpdates();
+    expect(appState(app).status?.cost).toBe(phase === "refresh" ? 2 : 0);
+    const liveEvent: SessionUiEvent = { type: "status.update", status: { ...status, cost: 1 } };
+    handler?.(liveEvent);
+    sessions.flushPendingUpdates();
+    expect(appState(app).status?.cost).toBe(1);
+    sessions.dispose();
   });
 
   it("does not let an older route restore apply its workspace response after a newer route request", async () => {

@@ -361,6 +361,15 @@ export class SessionController {
       }
       this.reportSessionError(session, machineId, error, errorOwner);
       if (options?.propagateRefreshError === true) throw error;
+    } finally {
+      // A newer URL selection can retire this join before its replacement has
+      // reached the controller. Release our buffering socket in that gap, but
+      // never close a socket already owned by a newer controller selection.
+      if (buffered !== undefined && !navigationIsCurrent(options?.navigation)
+        && this.isCurrentSessionSelection(session.id, machineId, seq)) {
+        buffered.length = 0;
+        this.socket.close();
+      }
     }
   }
 

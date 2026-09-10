@@ -98,6 +98,7 @@ const PANEL_EDGE_COLUMNS_WIDTH_PX = 2;
 const DESKTOP_SIDE_BY_SIDE_MEDIA_QUERY = "(min-width: 1181px)";
 const NAVIGATION_SCOPES = ["machine", "project", "workspace", "session", "tool", "view"] as const;
 const ROUTE_RESTORE_SCOPE = NAVIGATION_SCOPES;
+const ROUTE_SELECTION_SCOPE = ["machine", "project", "workspace", "session"] as const;
 const WORKSPACE_SURFACE_SCOPE = ["tool", "view"] as const;
 
 type WorkspaceRouteUrlPublication = "current-url" | "deferred";
@@ -668,19 +669,20 @@ export class PiWebApp extends LitElement {
     const machineBeforeRestore = selectedMachineId(this.state);
     const routeSurface = parsedRoute.projectId === undefined || parsedRoute.projectId === "" ? emptyWorkspaceRouteSurface() : surface;
     const navigation = this.beginNavigationOperation(ROUTE_RESTORE_SCOPE);
+    const selectionNavigation = this.beginNavigationOperation(ROUTE_SELECTION_SCOPE);
     const restoreSeq = ++this.routeRestoreSeq;
     this.routeRestoreDepth += 1;
     try {
       const machineResolved = await this.restoreRouteMachine(parsedRoute, false);
       if (!machineResolved) {
-        if (!this.isCurrentRouteRestore(restoreSeq, navigation)) return;
+        if (!selectionNavigation.isCurrent()) return;
         this.workspaces.clearSelection({ updateUrl: false });
         const machineId = parsedRoute.machineId ?? "local";
         this.browserErrors.report(machineBrowserErrorScope(machineId), `Machine not found: ${machineId}`);
         return;
       }
       await this.loadPluginsForSelectedMachine();
-      if (!this.isCurrentRouteRestore(restoreSeq, navigation)) return;
+      if (!selectionNavigation.isCurrent()) return;
       const route = resolveAppRoute(parsedRoute, (value) => this.plugins.resolveWorkspacePanelRouteId(value, selectedMachineId(this.state)));
       const unavailableToolRoute = parsedRoute.tool !== undefined && route.tool === undefined;
       const unavailablePanelViewRoute = parsedRoute.view !== undefined && parsedRoute.view !== "chat" && route.view === undefined;
@@ -697,10 +699,14 @@ export class PiWebApp extends LitElement {
         navigation,
         ...(restoredWorkspaceIdentity === undefined ? {} : { restoredWorkspaceIdentity }),
       };
-      this.setState({
-        workspaceTool: route.tool ?? this.state.workspaceTool,
-        mainView: this.resolveRestoredMainView(restoredMainView) ?? route.view ?? this.defaultRouteView(),
-      });
+      // A newer surface may retire route finalization without retiring the
+      // hierarchy load needed by that same workspace/session destination.
+      if (this.isCurrentRouteRestore(restoreSeq, navigation)) {
+        this.setState({
+          workspaceTool: route.tool ?? this.state.workspaceTool,
+          mainView: this.resolveRestoredMainView(restoredMainView) ?? route.view ?? this.defaultRouteView(),
+        });
+      }
       if (route.projectId === undefined || route.projectId === "") {
         this.workspaces.clearSelection({ updateUrl: false });
         await this.finishWorkspaceRouteRestore(routeSurface, {
@@ -744,11 +750,11 @@ export class PiWebApp extends LitElement {
       // unchanged ancestors. Current-URL restores still validate through their
       // normal workspace and session listing requests.
       if (loadedSession !== undefined) {
-        await this.sessions.selectSession(loadedSession, { updateUrl: false, navigation });
+        await this.sessions.selectSession(loadedSession, { updateUrl: false, navigation: selectionNavigation });
       } else if (loadedWorkspace !== undefined) {
-        await this.workspaces.selectWorkspace(loadedWorkspace, { sessionId: route.sessionId, updateUrl: false, navigation });
+        await this.workspaces.selectWorkspace(loadedWorkspace, { sessionId: route.sessionId, updateUrl: false, navigation: selectionNavigation });
       } else {
-        await this.workspaces.selectProject(project, { workspaceId: route.workspaceId, sessionId: route.sessionId, updateUrl: false, navigation });
+        await this.workspaces.selectProject(project, { workspaceId: route.workspaceId, sessionId: route.sessionId, updateUrl: false, navigation: selectionNavigation });
       }
       if (!this.isCurrentRouteRestore(restoreSeq, navigation)) return;
       await this.finishWorkspaceRouteRestore(routeSurface, finishOptions);
