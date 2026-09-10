@@ -288,9 +288,12 @@ export class TerminalPanel extends LitElement {
     if (request === undefined) return false;
     const key = JSON.stringify([scope, request]);
     const shouldAutoStart = this.consumedAutoStartRequest !== key;
+    // Reject stale host contexts before consuming the request or creating a process.
+    // As with terminal selection, legacy void-returning hosts remain accepted.
+    const navigationResult: unknown = this.context?.navigation?.set("start", undefined, { replace: true });
+    if (navigationResult === false) return false;
     this.consumedAutoStartRequest = key;
     this.requestedAutoStartRequest = undefined;
-    this.context?.navigation?.set("start", undefined, { replace: true });
     return shouldAutoStart;
   }
 

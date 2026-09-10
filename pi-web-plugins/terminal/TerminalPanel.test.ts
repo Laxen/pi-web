@@ -186,6 +186,43 @@ describe("Terminal panel lifecycle", () => {
     expect(Reflect.get(explicitPanel, "selectedId")).toBe("created-terminal");
   });
 
+  it.each(["load", "loaded"] as const)("does not consume or create a rejected one-shot request (%s panel)", async (phase) => {
+    const panel = createTerminalPanel();
+    const runtime = new TerminalBrowserRuntime(new InMemoryTerminalSelectionMemory());
+    const setNavigation = vi.fn(() => false);
+    const request = vi.fn((operation: string): Promise<JsonValue> =>
+      Promise.resolve(operation === "terminal.create" ? terminalInfo("created-terminal") : []));
+    const context = terminalContext({
+      pairedBackend: terminalBackend(request),
+      navigation: { ...terminalNavigation(undefined, "open-1"), set: setNavigation },
+    });
+    Reflect.set(panel, "context", context);
+    Reflect.set(panel, "runtime", runtime);
+    callPanelMethod(panel, "willUpdate");
+    if (phase === "load") await callAsyncPanelMethod(panel, "loadTerminals");
+    else {
+      Reflect.set(panel, "loadedWorkspaceScope", runtime.workspaceScope(context));
+      callPanelMethod(panel, "applyAutoStartRequest");
+    }
+
+    expect(setNavigation).toHaveBeenCalledExactlyOnceWith("start", undefined, { replace: true });
+    expect(request.mock.calls.map(([operation]) => operation)).not.toContain("terminal.create");
+    expect(Reflect.get(panel, "selectedId")).toBeUndefined();
+    expect(runtime.selection.latestTerminalId(runtime.selectionScope(context))).toBeUndefined();
+
+    // A fresh context can still accept this same request: rejection did not consume it.
+    const acceptedNavigation = vi.fn(() => true);
+    Reflect.set(panel, "context", {
+      ...context,
+      navigation: { ...terminalNavigation(undefined, "open-1"), set: acceptedNavigation },
+    });
+    callPanelMethod(panel, "willUpdate");
+    await callAsyncPanelMethod(panel, "loadTerminals");
+    expect(request.mock.calls.filter(([operation]) => operation === "terminal.create")).toHaveLength(1);
+    expect(Reflect.get(panel, "selectedId")).toBe("created-terminal");
+    expect(acceptedNavigation).toHaveBeenCalledWith("start", undefined, { replace: true });
+  });
+
   it("keeps newer same-workspace terminal navigation when create settles", async () => {
     const panel = createTerminalPanel();
     const runtime = new TerminalBrowserRuntime(new InMemoryTerminalSelectionMemory());
