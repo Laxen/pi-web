@@ -1717,10 +1717,16 @@ export class SessionController {
       const wasSelected = this.getState().selectedSession?.id === session.id;
       this.setState({ sessions: [cachedReplacement, ...this.getState().sessions.filter((candidate) => candidate.id !== session.id)], error: "" });
       if (wasSelected && this.navigateToSession !== undefined) {
-        await this.navigateToSession(cachedReplacement, {
+        const accepted = await this.navigateToSession(cachedReplacement, {
           ...(options?.updateUrl === false ? { replace: true } : {}),
           expected,
         });
+        // The replacement is durable, but rejected navigation does not grant
+        // permission to select it or rewrite the newer URL. Retire only our
+        // removed cached selection while the route owner finishes restoring.
+        if (!accepted && this.isCurrentSessionSelection(session.id, machineId, selectionSeq)) {
+          this.clearActiveSession();
+        }
       } else {
         await this.selectSession(cachedReplacement, { updateUrl: false });
         this.updateUrl(options?.updateUrl === false ? { replace: true } : undefined);
