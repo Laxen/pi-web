@@ -47,14 +47,15 @@ for (const Picker of [CommandPicker, ModelPicker]) {
       const first = requiredElement(pins(picker)[0], "first pin");
       const second = requiredElement(pins(picker)[1], "second pin");
       expect(root(picker).querySelectorAll(".default-help strong")).toHaveLength(1);
-      expect(requiredElement(root(picker).querySelector(".default-help"), "help").textContent).toContain("future sessions");
+      expect(requiredElement(root(picker).querySelector(".default-help"), "help").textContent).toBe("New session default");
       expect(requiredElement(root(picker).querySelector(".options"), "options").textContent).not.toContain("Default");
       expect(root(picker).querySelector("button button")).toBeNull();
       expect(first.textContent.trim()).toBe("");
       expect(first.getAttribute("aria-pressed")).toBe("true");
       expect(requiredElement(first.querySelector("svg"), "pin icon").getAttribute("fill")).toBe("currentColor");
       expect(second.getAttribute("aria-pressed")).toBe("false");
-      expect(second.title).toBe("Set Beta as default for future sessions");
+      expect(requiredElement(second.querySelector("svg"), "default star").getAttribute("fill")).toBe("none");
+      expect(second.title).toBe("Use Beta as default for new sessions");
       expect(second.getAttribute("aria-label")).toBe(second.title);
       second.click();
       await settleRenderedDialog(picker);

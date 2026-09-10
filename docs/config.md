@@ -19,7 +19,7 @@ If you installed services with a custom config path, `pi-web start`, `pi-web res
 
 ## Startup model and thinking defaults
 
-Open the model or thinking-level selector and click a row’s pin under **Default** to save it for future sessions. A filled pin marks the saved default. Clicking the option itself changes only the current session; pinning leaves the current session unchanged.
+Open the model or thinking-level selector and click a row’s star under **New session default** to save it for new sessions. A filled star marks the saved default. Clicking the option itself changes only the current session; setting the default leaves the current session unchanged.
 
 Defaults are saved in Pi’s global `settings.json` on the selected session’s machine (`~/.pi/agent/settings.json` by default), using `defaultProvider`, `defaultModel`, and `defaultThinkingLevel`. They apply to new sessions without restarting. Project `.pi/settings.json` overrides, explicit startup choices, and per-model thinking settings still take precedence. A default model must be enabled; otherwise startup falls back to the first enabled model. Resumed sessions keep their saved model and thinking level.
 
