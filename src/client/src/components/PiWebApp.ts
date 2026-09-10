@@ -1135,7 +1135,11 @@ export class PiWebApp extends LitElement {
     return (current.machineId ?? "local") === expected.machineId
       && current.projectId === expected.projectId
       && current.workspaceId === expected.workspaceId
-      && current.sessionId === expected.sessionId
+      // Restoration accepts abbreviated session IDs; guarded handoffs must
+      // recognize the same resolved identity without relaxing hierarchy checks.
+      && (current.sessionId === undefined
+        ? expected.sessionId === undefined
+        : sessionMatchesRouteTarget(expected.sessionId, current.sessionId))
       && current.tool === expected.tool
       && current.view === expected.view;
   }

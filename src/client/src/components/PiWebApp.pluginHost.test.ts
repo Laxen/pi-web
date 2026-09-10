@@ -336,6 +336,73 @@ describe("PiWebApp plugin host", () => {
     await selection;
   });
 
+  it.each([false, true])("archives a session opened through an abbreviated route (fallback: %s)", async (hasFallback) => {
+    const selected: SessionInfo = { id: "abcdef-full", persisted: true, cwd: workspace.path, path: "/repo/selected.jsonl", created: "now", modified: "now", messageCount: 2, firstMessage: "Hello" };
+    const fallback: SessionInfo = { ...selected, id: "next-session", path: "/repo/next.jsonl" };
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&session=abcdef");
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(), selectedProject: project, selectedWorkspace: workspace,
+      workspaces: [workspace], selectedSession: selected, sessions: hasFallback ? [selected, fallback] : [selected],
+    });
+    const sessions: unknown = Reflect.get(app, "sessions");
+    if (!(sessions instanceof SessionController)) throw new Error("Session controller unavailable");
+    const archive = vi.fn().mockResolvedValue(undefined);
+    Reflect.set(sessions, "api", { archive });
+    const restore = vi.fn(() => { setAppState(app, { ...appState(app), selectedSession: hasFallback ? fallback : undefined }); });
+    stubCommittedRouteRestore(app, restore);
+
+    await sessions.archiveSession();
+
+    expect(archive).toHaveBeenCalledWith(selected, "local");
+    expect(browser.url.searchParams.get("session")).toBe(hasFallback ? fallback.id : null);
+    expect(restore).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { change: undefined, accepted: true },
+    { change: ["session", "different-session"], accepted: false },
+    { change: ["session", "abcdef-other-full"], accepted: false },
+    { change: ["machine", "remote-1"], accepted: false },
+    { change: ["project", "project-2"], accepted: false },
+    { change: ["workspace", "workspace-2"], accepted: false },
+  ] as const)("guards a tree fork from an abbreviated route against $change", async ({ change, accepted }) => {
+    const selected: SessionInfo = { id: "abcdef-full", persisted: true, cwd: workspace.path, path: "/repo/selected.jsonl", created: "now", modified: "now", messageCount: 2, firstMessage: "Hello" };
+    const forked: SessionInfo = { ...selected, id: "forked-session", path: "/repo/forked.jsonl" };
+    const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&session=abcdef");
+    const app = new PiWebApp();
+    setAppState(app, {
+      ...initialAppState(), selectedProject: project, selectedWorkspace: workspace,
+      workspaces: [workspace], selectedSession: selected, sessions: [selected],
+      treeDialog: { nodes: [], activeLeafId: "leaf", activePathIds: ["leaf"] },
+    });
+    const sessions: unknown = Reflect.get(app, "sessions");
+    if (!(sessions instanceof SessionController)) throw new Error("Session controller unavailable");
+    const completion = deferred<{ cancelled: false; session: SessionInfo }>();
+    Reflect.set(sessions, "api", { forkTree: () => completion.promise });
+    const restore = vi.fn(() => { setAppState(app, { ...appState(app), selectedSession: forked }); });
+    stubCommittedRouteRestore(app, restore);
+
+    const fork = sessions.forkFromTree("leaf");
+    if (change !== undefined) {
+      const next = new URL(window.location.href);
+      next.searchParams.set(change[0], change[1]);
+      window.history.pushState({}, "", next);
+    }
+    const pendingUrl = browser.url.href;
+    completion.resolve({ cancelled: false, session: forked });
+    await fork;
+
+    if (accepted) {
+      expect(browser.url.searchParams.get("session")).toBe(forked.id);
+      expect(restore).toHaveBeenCalledOnce();
+    } else {
+      expect(browser.url.href).toBe(pendingUrl);
+      expect(restore).not.toHaveBeenCalled();
+    }
+    expect(appState(app).sessions).toContainEqual(forked);
+  });
+
   it("publishes Chat before starting a session from another workspace view", async () => {
     const previousSession: SessionInfo = { id: "session-old", cwd: workspace.path, path: "/repo/.sessions/session-old", created: "now", modified: "now", messageCount: 0, firstMessage: "" };
     const browser = installBrowserWindow("http://localhost/app?project=project-1&workspace=workspace-1&session=session-old&tool=core%3Aworkspace.terminal&view=core%3Aworkspace.terminal");
