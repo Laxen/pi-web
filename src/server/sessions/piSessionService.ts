@@ -68,6 +68,8 @@ import type {
   SessionUnreadCatalogSnapshot,
   SessionWarning,
 } from "../../shared/apiTypes.js";
+import type { SessionDefaults, SessionDefaultsUpdate } from "../../shared/apiTypes.js";
+import { parseSessionDefaults, parseSessionDefaultsUpdate } from "../../shared/sessionDefaults.js";
 import type { SessionRouteRef, SessionRouteService } from "./sessionService.js";
 
 import { type AuthChange } from "./authService.js";
@@ -2301,6 +2303,47 @@ export class PiSessionService implements SessionRouteService {
       ? null
       : annotateAssistantThinkingLevel(projectBrowserMessage(streamingMessage), session.thinkingLevel);
     return { seq, partial };
+  }
+
+  async getSessionDefaults(ref: PiSessionRef): Promise<SessionDefaults> {
+    await this.getOrOpen(ref);
+    const settings = SettingsManager.create(ref.cwd, this.agentDir);
+    await settings.reload();
+    this.assertDefaultsSettingsHealthy(settings);
+    // Do not use merged getters: workspace overrides are not global pins.
+    return parseSessionDefaults(settings.getGlobalSettings());
+  }
+
+  async setSessionDefaults(ref: PiSessionRef, defaults: SessionDefaultsUpdate): Promise<SessionDefaults> {
+    const update = parseSessionDefaultsUpdate({ ...defaults });
+    await this.assertWritable(ref);
+    const session = await this.getOrOpen(ref);
+    return this.runModelScopeMutation(async () => {
+      // A separate manager avoids mutating the active session's settings cache.
+      const settings = SettingsManager.create(ref.cwd, this.agentDir);
+      await settings.reload();
+      this.assertDefaultsSettingsHealthy(settings);
+      if (update.provider !== undefined && update.modelId !== undefined) {
+        await session.modelRuntime.refresh({ allowNetwork: false });
+        const target = `${update.provider}/${update.modelId}`;
+        const enabledIds = await resolveEnabledModelIds({ settingsManager: settings, modelRuntime: session.modelRuntime, scopedModels: [] });
+        if (!session.modelRuntime.getAvailableSnapshot().some((model) => modelScopeId(model) === target)) {
+          throw new Error(`Model not found: ${target}`);
+        }
+        if (enabledIds !== null && !enabledIds.includes(target)) throw new Error(`Model is not enabled: ${target}`);
+        settings.setDefaultModelAndProvider(update.provider, update.modelId);
+      } else if (update.thinkingLevel !== undefined) {
+        settings.setDefaultThinkingLevel(update.thinkingLevel);
+      }
+      await settings.flush();
+      this.assertDefaultsSettingsHealthy(settings);
+      return parseSessionDefaults(settings.getGlobalSettings());
+    });
+  }
+
+  private assertDefaultsSettingsHealthy(settings: SettingsManager): void {
+    const errors = settings.drainErrors();
+    if (errors.length > 0) throw new Error(`Session defaults settings failed: ${errors.map(({ error }) => error.message).join("; ")}`);
   }
 
   async availableModels(ref: PiSessionRef): Promise<ClientSessionModel[]> {

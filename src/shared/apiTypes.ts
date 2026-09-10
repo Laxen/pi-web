@@ -1095,6 +1095,18 @@ export interface ModelSelectionResponse {
   models: SessionModel[];
 }
 
+export interface SessionDefaults {
+  defaultProvider?: string;
+  defaultModel?: string;
+  defaultThinkingLevel?: import("./thinkingLevels.js").ThinkingLevel;
+}
+
+export interface SessionDefaultsUpdate {
+  provider?: string;
+  modelId?: string;
+  thinkingLevel?: import("./thinkingLevels.js").ThinkingLevel;
+}
+
 export interface ThinkingLevelsResponse {
   levels: string[];
 }
