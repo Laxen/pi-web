@@ -1317,7 +1317,8 @@ export class PiWebApp extends LitElement {
       || this.state.selectedWorkspace?.id !== workspace.id
       || this.state.selectedProject?.id !== workspace.projectId) {
       if (!this.routeRestoreInProgress) this.rememberCurrentMachineNavigation();
-      await this.commitAndRestoreNavigation(destination);
+      if (!await this.commitAndRestoreNavigation(destination)) return;
+      this.replaceNavigationUrl();
       return;
     }
 

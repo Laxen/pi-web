@@ -526,7 +526,7 @@ describe("PiWebApp plugin host", () => {
     expect(focusNavigationTarget).not.toHaveBeenCalled();
   });
 
-  it("publishes a runtime terminal destination before recovering its workspace", async () => {
+  it.each([false, true])("finalizes a runtime terminal destination after real workspace recovery (missing target: %s)", async (missingTarget) => {
     const previousProject: Project = { id: "project-old", name: "Old project", path: "/old", createdAt: "now" };
     const nextProject: Project = { id: "project-next", name: "Next project", path: "/next", createdAt: "now" };
     const previousWorkspace: Workspace = { id: "workspace-old", projectId: previousProject.id, path: "/old", label: "Old", isMain: true, effectiveConfig: {} };
@@ -548,16 +548,8 @@ describe("PiWebApp plugin host", () => {
       workspaceAtCommit = appState(app).selectedWorkspace?.id;
       window.history.replaceState(state, title, next);
     });
-    if (!Reflect.set(app, "restoreRouteFor", () => {
-      setAppState(app, {
-        ...appState(app),
-        selectedProject: nextProject,
-        selectedWorkspace: nextWorkspace,
-        workspaces: [nextWorkspace],
-        selectedSession: undefined,
-      });
-      return Promise.resolve();
-    })) throw new Error("Could not stub runtime terminal route reconciliation");
+    const session = runtimeRecoverySession(nextWorkspace);
+    const sessions = installRuntimeRecoveryBoundaries(app, () => Promise.resolve(missingTarget ? [] : [nextWorkspace]), session);
 
     await callAsyncAppMethod(app, "navigateRuntimeWorkspaceContribution", "local", nextWorkspace, {
       contributionId: TERMINAL_PANEL_ID,
@@ -570,12 +562,20 @@ describe("PiWebApp plugin host", () => {
 
     expect(workspaceAtCommit).toBe(previousWorkspace.id);
     expect(browser.url.searchParams.get("project")).toBe(nextProject.id);
-    expect(browser.url.searchParams.get("workspace")).toBe(nextWorkspace.id);
-    expect(browser.url.searchParams.get("view")).toBe(TERMINAL_PANEL_ID);
-    expect(browser.url.searchParams.get("pi-web.terminal.workspace.terminal--terminal")).toBe("terminal-next");
+    expect(browser.url.searchParams.get("workspace")).toBe(missingTarget ? null : nextWorkspace.id);
+    expect(browser.url.searchParams.get("session")).toBe(missingTarget ? null : session.id);
+    expect(appState(app).selectedWorkspace?.id).toBe(missingTarget ? undefined : nextWorkspace.id);
+    expect(appState(app).selectedSession?.id).toBe(missingTarget ? undefined : session.id);
+    if (!missingTarget) {
+      expect(browser.url.searchParams.get("view")).toBe(TERMINAL_PANEL_ID);
+      expect(browser.url.searchParams.get("pi-web.terminal.workspace.terminal--terminal")).toBe("terminal-next");
+    } else {
+      expect(browser.url.searchParams.has("pi-web.terminal.workspace.terminal--terminal")).toBe(false);
+    }
+    sessions.dispose();
   });
 
-  it("keeps a newer terminal query when runtime workspace recovery settles", async () => {
+  it.each([false, true])("preserves newer navigation when runtime workspace recovery settles (superseded: %s)", async (superseded) => {
     const browser = installBrowserWindow("http://localhost/app?project=project-old&workspace=workspace-old&view=chat");
     const app = new PiWebApp();
     const previousProject: Project = { id: "project-old", name: "Old project", path: "/old", createdAt: "now" };
@@ -591,13 +591,10 @@ describe("PiWebApp plugin host", () => {
       workspaceTool: TERMINAL_PANEL_ID,
       mainView: "chat",
     });
-    let resolveRestore: (() => void) | undefined;
-    let restoreStarted = false;
-    const restore = new Promise<void>((resolve) => { resolveRestore = resolve; });
-    if (!Reflect.set(app, "restoreRouteFor", () => {
-      restoreStarted = true;
-      return restore;
-    })) throw new Error("Could not stub terminal route recovery");
+    const workspaceLoad = deferred<Workspace[]>();
+    const loadWorkspaces = vi.fn(() => workspaceLoad.promise);
+    const session = runtimeRecoverySession(nextWorkspace);
+    const sessions = installRuntimeRecoveryBoundaries(app, loadWorkspaces, session);
 
     const opening = callAsyncAppMethod(app, "navigateRuntimeWorkspaceContribution", "local", nextWorkspace, {
       contributionId: TERMINAL_PANEL_ID,
@@ -607,12 +604,28 @@ describe("PiWebApp plugin host", () => {
       selection: { machineId: "local", projectId: previousProject.id, workspaceId: previousWorkspace.id, view: "chat" },
       url: window.location.href,
     });
-    await vi.waitFor(() => { expect(restoreStarted).toBe(true); });
-    browser.navigate(`http://localhost/app?project=project-next&workspace=workspace-next&view=${encodeURIComponent(TERMINAL_PANEL_ID)}&pi-web.terminal.workspace.terminal--terminal=terminal-new`);
-    resolveRestore?.();
+    await vi.waitFor(() => { expect(loadWorkspaces).toHaveBeenCalledOnce(); });
+    if (superseded) {
+      browser.navigate("http://localhost/app?view=chat");
+      await callAsyncAppMethod(app, "restoreRouteFor", { view: "chat" }, false);
+    } else {
+      browser.navigate(`http://localhost/app?project=project-next&workspace=workspace-next&view=${encodeURIComponent(TERMINAL_PANEL_ID)}&pi-web.terminal.workspace.terminal--terminal=terminal-new`);
+    }
+    const latestUrl = browser.url.href;
+    const replace = vi.spyOn(window.history, "replaceState").mockClear();
+    workspaceLoad.resolve([nextWorkspace]);
     await opening;
 
-    expect(browser.url.searchParams.get("pi-web.terminal.workspace.terminal--terminal")).toBe("terminal-new");
+    if (superseded) {
+      expect(browser.url.href).toBe(latestUrl);
+      expect(replace).not.toHaveBeenCalled();
+      expect(appState(app).selectedProject).toBeUndefined();
+    } else {
+      expect(browser.url.searchParams.get("pi-web.terminal.workspace.terminal--terminal")).toBe("terminal-new");
+      expect(browser.url.searchParams.get("session")).toBe(session.id);
+      expect(appState(app).selectedSession?.id).toBe(session.id);
+    }
+    sessions.dispose();
   });
 
   it("keeps a newer contribution query when remembered machine navigation settles", async () => {
@@ -3053,6 +3066,44 @@ function registerFilesRuntimePanel(
       }),
     },
   });
+}
+
+function runtimeRecoverySession(workspace: Workspace): SessionInfo {
+  return { id: "session-next", cwd: workspace.path, path: `${workspace.path}/session-next`, created: "now", modified: "now", messageCount: 0, firstMessage: "" };
+}
+
+// Keep route, workspace and session reconciliation real; replace only I/O and
+// unrelated background refreshes so a successful restore can choose a session.
+function installRuntimeRecoveryBoundaries(
+  app: PiWebApp,
+  loadWorkspaces: () => Promise<Workspace[]>,
+  session: SessionInfo,
+): SessionController {
+  markPluginLoadingReady(app);
+  vi.spyOn(app, "requestUpdate").mockImplementation(() => undefined);
+  if (!Reflect.set(app, "refreshWorkspaceDeletionRuns", () => Promise.resolve())) throw new Error("Could not stub deletion refresh");
+  const workspaces: unknown = Reflect.get(app, "workspaces");
+  if (typeof workspaces !== "object" || workspaces === null) throw new Error("Missing workspace controller");
+  if (!Reflect.set(workspaces, "api", {
+    workspaces: loadWorkspaces,
+    sessions: () => Promise.resolve([session]),
+  })) throw new Error("Could not stub workspace API");
+  const sessions: unknown = Reflect.get(app, "sessions");
+  if (!(sessions instanceof SessionController)) throw new Error("Missing session controller");
+  const socket: SessionEventSocket = {
+    connect: () => undefined,
+    setHandler: () => undefined,
+    close: () => undefined,
+  };
+  if (!Reflect.set(sessions, "socket", socket)
+    || !Reflect.set(sessions, "notifications", undefined)
+    || !Reflect.set(sessions, "api", {
+      messages: () => Promise.resolve({ messages: [], start: 0, total: 0 }),
+      status: () => Promise.resolve({ sessionId: session.id, isStreaming: false, isCompacting: false, isBashRunning: false, pendingMessageCount: 0, queuedMessages: [], tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 }),
+      streamSnapshot: () => Promise.resolve({ seq: 0, partial: null }),
+      thinkingLevels: () => Promise.resolve({ levels: [] }),
+    })) throw new Error("Could not stub session boundaries");
+  return sessions;
 }
 
 function markPluginLoadingReady(app: PiWebApp, loadedMachineIds: readonly string[] = []): void {
