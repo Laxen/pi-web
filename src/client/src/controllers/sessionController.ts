@@ -1013,6 +1013,32 @@ export class SessionController {
     }
   }
 
+  async getSessionDefaults() {
+    const session = this.getState().selectedSession;
+    if (!session || session.archived === true) return undefined;
+    const machineId = selectedMachineId(this.getState());
+    const errorOwner = this.captureSessionErrorOwner(session);
+    try {
+      return await this.api.getSessionDefaults(session, machineId);
+    } catch (error) {
+      this.reportSessionError(session, machineId, error, errorOwner);
+      return undefined;
+    }
+  }
+
+  async setSessionDefaults(defaults: Parameters<typeof defaultApi.setSessionDefaults>[1]) {
+    const session = this.getState().selectedSession;
+    if (!session || session.archived === true) return undefined;
+    const machineId = selectedMachineId(this.getState());
+    const errorOwner = this.captureSessionErrorOwner(session);
+    try {
+      return await this.api.setSessionDefaults(session, defaults, machineId);
+    } catch (error) {
+      this.reportSessionError(session, machineId, error, errorOwner);
+      return undefined;
+    }
+  }
+
   async setModel(provider: string, modelId: string) {
     const session = this.getState().selectedSession;
     if (!session || session.archived === true) return;
