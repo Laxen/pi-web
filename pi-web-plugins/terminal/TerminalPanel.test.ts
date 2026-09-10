@@ -252,6 +252,105 @@ describe("Terminal panel lifecycle", () => {
     expect(Reflect.get(panel, "terminals")).toEqual([terminalInfo("terminal-first"), terminalInfo("terminal-second")]);
   });
 
+  it.each(["close-first", "start-first"])("preserves a newer shell start when an older close settles %s", async (order) => {
+    const panel = createTerminalPanel();
+    const runtime = new TerminalBrowserRuntime(new InMemoryTerminalSelectionMemory());
+    const closing = deferred<JsonValue>();
+    const creating = deferred<JsonValue>();
+    const setNavigation = vi.fn();
+    const request = vi.fn((operation: string): Promise<JsonValue> => {
+      if (operation === "terminal.close") return closing.promise;
+      if (operation === "terminal.create") return creating.promise;
+      return Promise.resolve([]);
+    });
+    const context = terminalContext({
+      pairedBackend: terminalBackend(request),
+      navigation: { ...terminalNavigation("terminal-old"), set: setNavigation },
+    });
+    Reflect.set(panel, "context", context);
+    Reflect.set(panel, "runtime", runtime);
+    callPanelMethod(panel, "willUpdate");
+    Reflect.set(panel, "terminals", [terminalInfo("terminal-old"), terminalInfo("terminal-fallback")]);
+    callPanelMethod(panel, "selectPreferredLoadedTerminal");
+    setNavigation.mockClear();
+    const close = callAsyncPanelMethod(panel, "closeTerminal", "terminal-old", new Event("click"));
+    const start = callAsyncPanelMethod(panel, "startTerminal");
+    if (order === "close-first") {
+      closing.resolve({ closed: true });
+      await close;
+      expect(setNavigation).not.toHaveBeenCalled();
+      creating.resolve(terminalInfo("terminal-created"));
+      await start;
+    } else {
+      creating.resolve(terminalInfo("terminal-created"));
+      await start;
+      closing.resolve({ closed: true });
+      await close;
+    }
+    expect(Reflect.get(panel, "terminals")).toEqual([terminalInfo("terminal-fallback"), terminalInfo("terminal-created")]);
+    expect(Reflect.get(panel, "selectedId")).toBe("terminal-created");
+    expect(runtime.selection.latestTerminalId(runtime.selectionScope(context))).toBe("terminal-created");
+    expect(setNavigation).toHaveBeenCalledExactlyOnceWith("terminal", "terminal-created", undefined);
+  });
+
+  it.each([
+    ["load", "load"], ["load", "start"], ["start", "load"], ["start", "start"],
+  ] as const)("preserves shell creation with %s initiated first and %s settled first", async (initiatedFirst, settledFirst) => {
+    const panel = createTerminalPanel();
+    const runtime = new TerminalBrowserRuntime(new InMemoryTerminalSelectionMemory());
+    const listing = deferred<JsonValue>();
+    const creating = deferred<JsonValue>();
+    const setNavigation = vi.fn();
+    const request = vi.fn((operation: string): Promise<JsonValue> => {
+      if (operation === "terminal.list") return listing.promise;
+      if (operation === "terminal.create") return creating.promise;
+      return Promise.resolve([]);
+    });
+    const context = terminalContext({
+      pairedBackend: terminalBackend(request),
+      navigation: { ...terminalNavigation(), set: setNavigation },
+    });
+    Reflect.set(panel, "context", context);
+    Reflect.set(panel, "runtime", runtime);
+    callPanelMethod(panel, "willUpdate");
+    const first = callAsyncPanelMethod(panel, initiatedFirst === "load" ? "loadTerminals" : "startTerminal");
+    const second = callAsyncPanelMethod(panel, initiatedFirst === "load" ? "startTerminal" : "loadTerminals");
+    const load = initiatedFirst === "load" ? first : second;
+    const start = initiatedFirst === "start" ? first : second;
+    if (settledFirst === "load") {
+      listing.resolve([terminalInfo("terminal-listed")]);
+      await load;
+      expect(setNavigation).not.toHaveBeenCalled();
+      creating.resolve(terminalInfo("terminal-created"));
+      await start;
+    } else {
+      creating.resolve(terminalInfo("terminal-created"));
+      await start;
+      listing.resolve([terminalInfo("terminal-listed")]);
+      await load;
+    }
+    expect(Reflect.get(panel, "terminals")).toEqual([terminalInfo("terminal-listed"), terminalInfo("terminal-created")]);
+    expect(Reflect.get(panel, "selectedId")).toBe("terminal-created");
+    expect(runtime.selection.latestTerminalId(runtime.selectionScope(context))).toBe("terminal-created");
+    expect(setNavigation).toHaveBeenCalledExactlyOnceWith("terminal", "terminal-created", undefined);
+  });
+
+  it("does not resurrect a successfully closed terminal from an in-flight list", async () => {
+    const panel = createTerminalPanel();
+    const listing = deferred<JsonValue>();
+    const request = vi.fn((operation: string): Promise<JsonValue> => operation === "terminal.list"
+      ? listing.promise : Promise.resolve(operation === "terminal.close" ? { closed: true } : []));
+    Reflect.set(panel, "context", terminalContext({ pairedBackend: terminalBackend(request) }));
+    Reflect.set(panel, "runtime", new TerminalBrowserRuntime(new InMemoryTerminalSelectionMemory()));
+    callPanelMethod(panel, "willUpdate");
+    Reflect.set(panel, "terminals", [terminalInfo("terminal-old")]);
+    const load = callAsyncPanelMethod(panel, "loadTerminals");
+    await callAsyncPanelMethod(panel, "closeTerminal", "terminal-old", new Event("click"));
+    listing.resolve([terminalInfo("terminal-old"), terminalInfo("terminal-listed")]);
+    await load;
+    expect(Reflect.get(panel, "terminals")).toEqual([terminalInfo("terminal-listed")]);
+  });
+
   it("aborts and fences an in-flight create when authoritative workspace identity changes at the same path", async () => {
     const panel = createTerminalPanel();
     const runtime = new TerminalBrowserRuntime(new InMemoryTerminalSelectionMemory());
